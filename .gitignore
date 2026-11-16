@@ -1,0 +1,27 @@
+# Disk images and raw dumps (too large / sensitive to commit)
+*.img
+*.iso
+*.dd
+*.raw
+*.bin
+*.E01
+*.vhd
+*.vhdx
+*.vmdk
+*.qcow2
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Env / secrets
+.env
+.env.*
