@@ -1,0 +1,546 @@
+# hard-drive-analysis v4: can smartctl (SMART) metrics predict how much life a hard drive
+# has left, and when it will probably fail?
+#
+#   uv run data-pipeline            run whatever is out of date
+#   uv run data-pipeline -n         show what would run, and why
+#
+# Shared rules: config/study.toml. Scale (small/medium/full): config/sample.toml.
+# Models: one train_* step each. The predict step discovers them from its inputs.
+
+[pipeline]
+name = "hard-drive-analysis"
+# src: the gate is local code, so the runner fingerprints its source
+python_path = ["steps", "src"]
+state_dir = "build/.pipeline"
+
+# -- data --------------------------------------------------------------------------------
+
+[[steps]]
+name = "drive_index"
+description = "One row per drive: model, capacity, observed span, first failure (full-panel scan)"
+function = "drives:drive_index"
+inputs = { panel = "dataset/dataset.parquet" }
+outputs = { drives = "build/drives.parquet" }
+params = { chunk_months = 1, sha256 = "d43984e8200893ebdd1bc739cabff8e05dc759aeb572dc2adb5aaad29e40b556" }
+requires = ["duckdb>=2.0"]
+watch = ["steps/common.py"]
+
+[[steps]]
+name = "cohort"
+description = "HDDs only, stable drive split, stratified weighted sample"
+function = "drives:cohort"
+inputs = { drives = "build/drives.parquet", study = "config/study.toml", sample = "config/sample.toml" }
+outputs = { cohort = "build/cohort.parquet", summary = "build/cohort-summary.json" }
+requires = ["pandas>=2.2", "pyarrow"]
+watch = ["steps/common.py"]
+
+# extract reads the panel one date range at a time. Each read pays about 3 s of fixed cost
+# whatever its size, so 12-month chunks (10 reads) take 241 s against 470 s for 120
+# monthly ones, with the same rows (peak 10.2 GiB). drive_index keeps 1-month chunks: its
+# GROUP BY over a whole year spilled tens of GB.
+[[steps]]
+name = "extract"
+description = "The cohort's daily rows: curated SMART columns, deduplicated, cut at first failure"
+function = "panel:extract"
+inputs = { panel = "dataset/dataset.parquet", cohort = "build/cohort.parquet", study = "config/study.toml" }
+outputs = { panel_dir = "build/panel" }
+params = { chunk_months = 12, batches = 8 }
+requires = ["duckdb>=2.0", "pandas>=2.2"]
+watch = ["steps/common.py"]
+
+[[steps]]
+name = "snapshots"
+description = "Sampled snapshots: date-keyed trend features and right-censored survival labels"
+function = "panel:snapshots"
+inputs = { panel_dir = "build/panel", cohort = "build/cohort.parquet", study = "config/study.toml", sample = "config/sample.toml" }
+outputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json" }
+requires = ["duckdb>=2.0", "pandas>=2.2"]
+watch = ["steps/common.py"]
+
+[[steps]]
+name = "verify"
+description = "Pre-training gate (data-verify): split, temporal, label, weight, schema and leakage checks"
+function = "data_verify:verify"
+inputs = { snapshots = "build/snapshots.parquet", cohort = "build/cohort.parquet", schema = "build/feature-schema.json", study = "config/study.toml", sample = "config/sample.toml" }
+outputs = { report = "build/verify-report.json", summary = "build/verify-report.md" }
+requires = ["duckdb>=2.0", "pandas>=2.2"]
+watch = ["steps/hdd_checks.py", "steps/common.py", "steps/drives.py"]
+
+[steps.params]
+# one table, split column
+table = "snapshots"
+split_column = "split"
+splits = ["train", "val", "test"]
+
+# roles
+label = ["event", "duration_days"]
+task = { event = "binary", duration_days = "regression" }
+group = "serial_number"
+time = "date"
+weight = "weight"
+features = { from = "schema", key = "features" }
+# columns that describe the outcome or the observation window must never be features
+# (common.LEAK_COLUMNS, plus the cohort's sampling columns)
+forbidden = ["failure*", "*_date", "censor*", "date_days", "stratum", "drive_weight",
+             "n_post_failure_days"]
+
+# time: train/val end at train_end, test starts at test_start
+time_bounds.train = { max = { from = "study", key = "split.train_end" } }
+time_bounds.val = { max = { from = "study", key = "split.train_end" } }
+time_bounds.test = { min = { from = "study", key = "split.test_start" } }
+time_order = ["train < test", "val < test"]
+
+# drives go to splits by a stable sha256 bucket of the serial number (common.stable_bucket)
+split_rule = { key = "serial_number", method = "sha256", template = "split:{key}", modulo = 100, buckets = { train = { from = "study", key = "split.train_buckets" }, val = { from = "study", key = "split.val_buckets" }, test = { from = "study", key = "split.test_buckets" } } }
+
+# drive-model categories are the most common models among train drives (+ "other")
+fitted_levels = [{ name = "model_code", levels = { from = "schema", key = "categorical.model_code" }, dataset = "cohort", column = "model", where = "split == 'train'", allow = ["other"], top_k = true }]
+
+# Python checks in steps/hdd_checks.py
+custom = ["hdd_checks:stride_rows_on_stride_days", "hdd_checks:cohort_split_matches_stable_bucket",
+          "hdd_checks:features_are_float", "hdd_checks:few_sparse_features"]
+
+[steps.params.schema]
+columns = ["serial_number", "date", "split", "duration_days", "event", "weight", { from = "schema", key = "features" }]
+ordered = true
+dtypes = { date = "datetime", event = "int", duration_days = "int" }
+not_null = ["serial_number", "date", "split", "duration_days", "event", "weight"]
+unique = [["serial_number", "date"]]
+allowed = { event = [0, 1] }
+ranges = { duration_days = [0, inf], weight = [0, inf] }
+
+[steps.params.vars]
+train_end = { from = "study", key = "split.train_end" }
+horizon = { from = "study", key = "label.binary_horizon" }
+min_failing = { from = "study", key = "evaluation.min_failing_drives" }
+failing_fraction = { from = "sample", key = "scales.{scale}.failing_fraction" }
+healthy_fraction = { from = "sample", key = "scales.{scale}.healthy_fraction" }
+stride = { from = "sample", key = "scales.{scale}.stride_days" }
+dense = { from = "sample", key = "scales.{scale}.dense_days" }
+train_buckets = { from = "study", key = "split.train_buckets" }
+val_buckets = { from = "study", key = "split.val_buckets" }
+test_buckets = { from = "study", key = "split.test_buckets" }
+
+[steps.params.checks]
+# temporal split on purpose: drift and label shift between periods are expected
+"drift.features" = "off"
+"labels.shift" = "off"
+# a drive's weight is 1/sampling fraction * stride; a 10x spread is by design
+"weights.concentration" = { max_ratio = 10000.0 }
+
+# -- project rules: labels, censoring and weights, recomputed from the cohort -------------
+
+[[steps.params.assert]]
+name = "cohort_serials_unique"
+sql = "SELECT serial_number, count(*) AS n FROM cohort GROUP BY serial_number HAVING n > 1"
+
+[[steps.params.assert]]
+name = "snapshot_split_matches_cohort"
+category = "split"
+sql = """SELECT s.serial_number, s.split, c.split AS cohort_split FROM snapshots s
+         LEFT JOIN cohort c USING (serial_number)
+         WHERE c.split IS NULL OR c.split <> s.split"""
+
+[[steps.params.assert]]
+name = "cohort_weights_match_sampling"
+category = "weights"
+sql = """SELECT serial_number, stratum, drive_weight FROM cohort
+         WHERE abs(drive_weight - CASE stratum WHEN 'failing' THEN 1 / ${failing_fraction}
+                                               ELSE 1 / ${healthy_fraction} END) > 1e-9"""
+
+[[steps.params.assert]]
+name = "one_model_per_drive"
+severity = "warn"
+sql = "SELECT serial_number FROM cohort WHERE n_models_per_month > 1"
+
+[[steps.params.assert]]
+name = "no_snapshot_after_failure"
+category = "temporal"
+description = "A snapshot after the drive failed would describe the failure itself"
+sql = """SELECT s.serial_number, s.date, c.failure_date FROM snapshots s JOIN cohort c USING (serial_number)
+         WHERE c.failure_date IS NOT NULL AND s.date > c.failure_date"""
+
+[[steps.params.assert]]
+name = "labels_match_cohort"
+category = "labels"
+description = "event and duration_days recomputed from the cohort, censored at train_end for train/val"
+sql = """WITH e AS (
+           SELECT s.serial_number, s.date, s.split, s.event, s.duration_days, c.failure_date,
+                  CASE WHEN s.split = 'test' THEN c.last_date
+                       ELSE least(c.last_date, DATE '${train_end}') END AS censor
+           FROM snapshots s JOIN cohort c USING (serial_number)),
+         f AS (SELECT *, (failure_date IS NOT NULL AND failure_date <= censor)::INT AS ev FROM e)
+         SELECT * FROM f
+         WHERE event <> ev
+            OR (event = 1 AND duration_days <> date_diff('day', date, failure_date))
+            OR (event = 0 AND duration_days <> date_diff('day', date, censor))"""
+
+[[steps.params.assert]]
+name = "train_labels_do_not_see_test_period"
+category = "temporal"
+description = "A train/val failure after train_end must be censored, not labelled"
+sql = """SELECT s.serial_number, s.date, c.failure_date FROM snapshots s JOIN cohort c USING (serial_number)
+         WHERE s.split IN ('train', 'val') AND s.event = 1 AND c.failure_date > DATE '${train_end}'"""
+
+[[steps.params.assert]]
+name = "no_visible_failure_labelled_censored"
+category = "labels"
+sql = """SELECT s.serial_number, s.date FROM snapshots s JOIN cohort c USING (serial_number)
+         WHERE s.event = 0 AND c.failure_date IS NOT NULL
+           AND date_diff('day', s.date, c.failure_date) < ${horizon}
+           AND (s.split = 'test' OR c.failure_date <= DATE '${train_end}')"""
+
+[[steps.params.assert]]
+name = "snapshot_weights_valid"
+category = "weights"
+description = "Each snapshot weighs drive_weight (dense days) or drive_weight * stride"
+sql = """SELECT s.serial_number, s.date, s.weight, c.drive_weight FROM snapshots s JOIN cohort c USING (serial_number)
+         WHERE NOT (abs(s.weight - c.drive_weight) < 1e-6 OR abs(s.weight - c.drive_weight * ${stride}) < 1e-6)"""
+
+[[steps.params.assert]]
+name = "dense_rows_before_visible_failure"
+category = "weights"
+description = "Rows at full weight (every day kept) only in the dense window before a visible failure"
+sql = """SELECT s.serial_number, s.date FROM snapshots s JOIN cohort c USING (serial_number)
+         WHERE ${stride} > 1 AND abs(s.weight - c.drive_weight) < 1e-6
+           AND NOT coalesce(c.failure_date IS NOT NULL
+               AND date_diff('day', s.date, c.failure_date) < ${dense}
+               AND c.failure_date <= CASE WHEN s.split = 'test' THEN c.last_date
+                   ELSE least(c.last_date, DATE '${train_end}') END, false)"""
+
+[[steps.params.assert]]
+name = "cohort_drives_have_snapshots"
+severity = "warn"
+description = "Expected only for drives with fewer than stride_days rows in their split window (the offset is random, so weights stay unbiased)"
+sql = """SELECT c.serial_number, c.split FROM cohort c
+         WHERE c.serial_number NOT IN (SELECT DISTINCT serial_number FROM snapshots)"""
+
+[[steps.params.assert]]
+name = "failures_present_in_every_split"
+category = "labels"
+sql = """SELECT x.split FROM (VALUES ('train'), ('val'), ('test')) x(split)
+         LEFT JOIN (SELECT split, count(DISTINCT serial_number) AS n FROM snapshots
+                    WHERE event = 1 GROUP BY split) f USING (split)
+         WHERE coalesce(f.n, 0) = 0"""
+
+[[steps.params.assert]]
+name = "enough_failures_per_split"
+category = "labels"
+severity = "warn"
+description = "Fewer failing drives than evaluation.min_failing_drives makes metrics noisy"
+sql = """SELECT x.split, coalesce(f.n, 0) AS failing_drives FROM (VALUES ('train'), ('val'), ('test')) x(split)
+         LEFT JOIN (SELECT split, count(DISTINCT serial_number) AS n FROM snapshots
+                    WHERE event = 1 GROUP BY split) f USING (split)
+         WHERE coalesce(f.n, 0) < ${min_failing}"""
+
+[[steps]]
+name = "explore"
+description = "Failure rates per model, single-feature signal, correlations, survival by counters"
+function = "explore:explore"
+inputs = { drives = "build/drives.parquet", snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { dir = "build/explore" }
+depends_on = ["verify"]
+requires = ["matplotlib", "pandas>=2.2"]
+watch = ["steps/common.py", "steps/metrics.py", "steps/survival.py"]
+
+# -- models --------------------------------------------------------------------------------
+# kind = "hazard": discrete-time survival model -> a survival curve per snapshot.
+# kind = "binary": fails within study.label.binary_horizon days? (v2-style baseline)
+# features = "all" | "context" | "smart" (groups in build/feature-schema.json)
+# weight_power: training weights are the sampling weights to this power (0.5 ranks much
+# better than 1 on validation drives). Probabilities are recalibrated per bin on validation
+# drives with the true weights, so this changes ranking quality, not the probability scale.
+# include / exclude: glob patterns added to or removed from the feature group (ablations).
+# early_stopping_rounds: rounds without a better validation loss before training stops.
+# Each model's value sits above the longest such stretch before its best iteration,
+# replayed tree by tree from the 2026-10-28 full-scale models (smart 90, nosmart 90,
+# binary_30d 50, nocritical 28, usage 20, w075 6, w100 4 rounds). So training stops at
+# the same best iteration, with the same trees, without up to 80 extra rounds after it.
+# smart and nosmart keep 100 on purpose: a uniform 50 stops them early and moved test
+# scores by up to 0.017 (checked). Recheck the stretches if the data or features change.
+# histogram: "col" (default, low memory) or "row" (about 1.6x faster per round, about
+# 2 GiB more for the 65-feature hazard models at full scale; a step falls back to "col"
+# when it does not fit, see steps/model.py).
+# recalibrate_recent: also emit <model>_recent, calibrated on the last validation year only.
+
+[[steps]]
+name = "train_hazard_smart"
+description = "Survival model on SMART + context features (the model under test)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart.txt", meta = "build/models/hazard_smart.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", features = "all", seed = 42, weight_power = 0.5, recalibrate_recent = true, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_nosmart"
+description = "Ablation: same survival model without SMART (model, capacity, time in service)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_nosmart.txt", meta = "build/models/hazard_nosmart.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", features = "context", seed = 42, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 1.0, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_binary_30d"
+description = "Baseline: fails-within-30-days classifier on SMART + context"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/binary_30d.txt", meta = "build/models/binary_30d.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "binary", features = "all", seed = 42, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 60, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_nocritical"
+description = "Ablation: SMART + context without the counters behind Backblaze's replacement policy (5, 187, 188, 197, 198, raw, normalized and trends)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_nocritical.txt", meta = "build/models/hazard_nocritical.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", seed = 42, features = "all", weight_power = 0.5, exclude = ["smart_5_*", "smart_187_*", "smart_188_*", "smart_197_*", "smart_198_*"], num_boost_round = 2000, early_stopping_rounds = 40, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_usage"
+description = "Ablation: context + usage counters only (power-on hours, power cycles, start/stop, load cycles, head flying hours, LBAs)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_usage.txt", meta = "build/models/hazard_usage.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", seed = 42, features = "context", weight_power = 0.5, include = ["smart_4_raw", "smart_9_raw", "smart_12_raw", "smart_193_raw", "smart_240_raw", "smart_241_raw", "smart_242_raw"], num_boost_round = 2000, early_stopping_rounds = 30, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_smart_w075"
+description = "Sensitivity: the SMART model with training weights to the power 0.75"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart_w075.txt", meta = "build/models/hazard_smart_w075.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", seed = 42, features = "all", weight_power = 0.75, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_smart_w100"
+description = "Sensitivity: the SMART model with the full inverse-probability training weights"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart_w100.txt", meta = "build/models/hazard_smart_w100.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", seed = 42, features = "all", weight_power = 1.0, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+# Seed replicates: the reference survival model and the 30-day classifier retrained with
+# other seeds (LightGBM's row and feature subsampling), everything else unchanged. They
+# measure how much the metrics move between trainings, which the drive bootstrap leaves
+# out. evaluate scores them only in its seed_spread section (names ending in _seed<N>).
+
+[[steps]]
+name = "train_hazard_smart_seed1"
+description = "Seed replicate 1 of the SMART survival model (seed 43)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart_seed1.txt", meta = "build/models/hazard_smart_seed1.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", features = "all", seed = 43, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_smart_seed2"
+description = "Seed replicate 2 of the SMART survival model (seed 44)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart_seed2.txt", meta = "build/models/hazard_smart_seed2.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", features = "all", seed = 44, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_smart_seed3"
+description = "Seed replicate 3 of the SMART survival model (seed 45)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart_seed3.txt", meta = "build/models/hazard_smart_seed3.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", features = "all", seed = 45, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_smart_seed4"
+description = "Seed replicate 4 of the SMART survival model (seed 46)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart_seed4.txt", meta = "build/models/hazard_smart_seed4.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", features = "all", seed = 46, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_binary_30d_seed1"
+description = "Seed replicate 1 of the 30-day classifier (seed 43)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/binary_30d_seed1.txt", meta = "build/models/binary_30d_seed1.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "binary", features = "all", seed = 43, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 60, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_binary_30d_seed2"
+description = "Seed replicate 2 of the 30-day classifier (seed 44)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/binary_30d_seed2.txt", meta = "build/models/binary_30d_seed2.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "binary", features = "all", seed = 44, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 60, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_binary_30d_seed3"
+description = "Seed replicate 3 of the 30-day classifier (seed 45)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/binary_30d_seed3.txt", meta = "build/models/binary_30d_seed3.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "binary", features = "all", seed = 45, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 60, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_binary_30d_seed4"
+description = "Seed replicate 4 of the 30-day classifier (seed 46)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/binary_30d_seed4.txt", meta = "build/models/binary_30d_seed4.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "binary", features = "all", seed = 46, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 60, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+# -- evaluation ------------------------------------------------------------------------------
+
+[[steps]]
+name = "train_hazard_smart_w075_seed1"
+description = "Seed replicate 1 of the SMART survival model with training weights to the power 0.75 (seed 43)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart_w075_seed1.txt", meta = "build/models/hazard_smart_w075_seed1.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", seed = 43, features = "all", weight_power = 0.75, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_smart_w075_seed2"
+description = "Seed replicate 2 of the SMART survival model with training weights to the power 0.75 (seed 44)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart_w075_seed2.txt", meta = "build/models/hazard_smart_w075_seed2.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", seed = 44, features = "all", weight_power = 0.75, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_smart_w075_seed3"
+description = "Seed replicate 3 of the SMART survival model with training weights to the power 0.75 (seed 45)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart_w075_seed3.txt", meta = "build/models/hazard_smart_w075_seed3.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", seed = 45, features = "all", weight_power = 0.75, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "train_hazard_smart_w075_seed4"
+description = "Seed replicate 4 of the SMART survival model with training weights to the power 0.75 (seed 46)"
+function = "model:train"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
+outputs = { model = "build/models/hazard_smart_w075_seed4.txt", meta = "build/models/hazard_smart_w075_seed4.json" }
+depends_on = ["verify"]
+params = { histogram = "row", kind = "hazard", seed = 46, features = "all", weight_power = 0.75, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
+watch = ["steps/common.py", "steps/survival.py"]
+timeout = 21600
+
+[[steps]]
+name = "predict"
+description = "Score validation and test snapshots with every model and the rule baseline"
+function = "predict:predict"
+inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml", model_hazard_smart = "build/models/hazard_smart.txt", meta_hazard_smart = "build/models/hazard_smart.json", model_hazard_nosmart = "build/models/hazard_nosmart.txt", meta_hazard_nosmart = "build/models/hazard_nosmart.json", model_binary_30d = "build/models/binary_30d.txt", meta_binary_30d = "build/models/binary_30d.json", model_hazard_nocritical = "build/models/hazard_nocritical.txt", meta_hazard_nocritical = "build/models/hazard_nocritical.json", model_hazard_usage = "build/models/hazard_usage.txt", meta_hazard_usage = "build/models/hazard_usage.json", model_hazard_smart_w075 = "build/models/hazard_smart_w075.txt", meta_hazard_smart_w075 = "build/models/hazard_smart_w075.json", model_hazard_smart_w100 = "build/models/hazard_smart_w100.txt", meta_hazard_smart_w100 = "build/models/hazard_smart_w100.json", model_hazard_smart_seed1 = "build/models/hazard_smart_seed1.txt", meta_hazard_smart_seed1 = "build/models/hazard_smart_seed1.json", model_hazard_smart_seed2 = "build/models/hazard_smart_seed2.txt", meta_hazard_smart_seed2 = "build/models/hazard_smart_seed2.json", model_hazard_smart_seed3 = "build/models/hazard_smart_seed3.txt", meta_hazard_smart_seed3 = "build/models/hazard_smart_seed3.json", model_hazard_smart_seed4 = "build/models/hazard_smart_seed4.txt", meta_hazard_smart_seed4 = "build/models/hazard_smart_seed4.json", model_binary_30d_seed1 = "build/models/binary_30d_seed1.txt", meta_binary_30d_seed1 = "build/models/binary_30d_seed1.json", model_binary_30d_seed2 = "build/models/binary_30d_seed2.txt", meta_binary_30d_seed2 = "build/models/binary_30d_seed2.json", model_binary_30d_seed3 = "build/models/binary_30d_seed3.txt", meta_binary_30d_seed3 = "build/models/binary_30d_seed3.json", model_binary_30d_seed4 = "build/models/binary_30d_seed4.txt", meta_binary_30d_seed4 = "build/models/binary_30d_seed4.json", model_hazard_smart_w075_seed1 = "build/models/hazard_smart_w075_seed1.txt", meta_hazard_smart_w075_seed1 = "build/models/hazard_smart_w075_seed1.json", model_hazard_smart_w075_seed2 = "build/models/hazard_smart_w075_seed2.txt", meta_hazard_smart_w075_seed2 = "build/models/hazard_smart_w075_seed2.json", model_hazard_smart_w075_seed3 = "build/models/hazard_smart_w075_seed3.txt", meta_hazard_smart_w075_seed3 = "build/models/hazard_smart_w075_seed3.json", model_hazard_smart_w075_seed4 = "build/models/hazard_smart_w075_seed4.txt", meta_hazard_smart_w075_seed4 = "build/models/hazard_smart_w075_seed4.json" }
+outputs = { predictions = "build/predictions.parquet" }
+requires = ["lightgbm>=4.6", "pandas>=2.2", "pyarrow"]
+watch = ["steps/common.py", "steps/model.py", "steps/survival.py"]
+
+[[steps]]
+name = "evaluate"
+description = "Weighted, censoring-aware metrics with drive-level bootstrap intervals"
+function = "evaluate:evaluate"
+inputs = { predictions = "build/predictions.parquet", cohort = "build/cohort.parquet", study = "config/study.toml", sample = "config/sample.toml", schema = "build/feature-schema.json" }
+outputs = { metrics = "build/metrics.json", calibration = "build/calibration.csv", detection = "build/detection.csv", life = "build/life.csv" }
+params = { reference = "hazard_smart", concordance_max_rows = 300000, firmware_model = "MG08ACA16TEY" }
+requires = ["numpy", "pandas>=2.2"]
+watch = ["steps/common.py", "steps/metrics.py", "steps/survival.py"]
+
+# timing_tolerance: the answer calls the predicted failure days "about right" when the
+# mean miss over the 10/50/90% days, each scaled by the largest miss possible for its
+# target, is within this value; otherwise it says too pessimistic or too optimistic.
+# labels: the display name of each model in the report's text, tables and figures. A model
+# without a label is shown under its own name (hazard_smart, rule_counters, ...).
+
+[[steps]]
+name = "report"
+description = "Headline numbers (build/report/results.md) and the detailed analysis with figures (build/report/analysis.md)"
+function = "report:report"
+inputs = { metrics = "build/metrics.json", calibration = "build/calibration.csv", detection = "build/detection.csv", life = "build/life.csv", predictions = "build/predictions.parquet", cohort_summary = "build/cohort-summary.json", verify = "build/verify-report.json", explore = "build/explore", meta_hazard_smart = "build/models/hazard_smart.json" }
+outputs = { dir = "build/report" }
+requires = ["matplotlib", "pandas>=2.2"]
+
+[steps.params]
+timing_tolerance = 0.15
+
+[steps.params.labels]
+hazard_smart = "survival model, SMART + context"
+hazard_nosmart = "survival model, context only (no SMART)"
+binary_30d = "30-day yes/no classifier (SMART + context)"
+rule_counters = "rule: critical SMART counters (5, 187, 197, 198)"
+hazard_nocritical = "survival model, SMART without counters 5/187/188/197/198"
+hazard_usage = "survival model, context + usage counters"
+hazard_smart_w075 = "survival model, SMART + context, weight power 0.75"
+hazard_smart_w100 = "survival model, SMART + context, weight power 1.0"
+hazard_smart_recent = "survival model, SMART + context, recalibrated on the last year"
