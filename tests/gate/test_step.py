@@ -323,6 +323,18 @@ def test_the_project_pipeline_passes_lint():
     assert main(["lint", str(Path(__file__).parents[2] / "pipeline.toml")]) == 0
 
 
+def test_the_project_pipeline_fingerprints_the_gate_source():
+    """src is on python_path, so editing a gate check reruns the verify step."""
+    from data_pipeline import checkpoint, config
+
+    root = Path(__file__).parents[2]
+    pipeline = config.load(root / "pipeline.toml")
+    step = next(s for s in pipeline.steps if s.function == "data_verify:verify")
+    assert checkpoint.module_file(pipeline, step.module) == root / "src/data_verify/__init__.py"
+    deps = {p.relative_to(root).as_posix() for p in checkpoint.local_imports(pipeline, step.module)}
+    assert {"src/data_verify/core.py", "src/data_verify/checks/temporal.py"} <= deps
+
+
 @pytest.mark.parametrize("params, names, expected", [
     ({"label": "y"}, ["train", "test", "aux"], ["train", "test"]),
     ({"label": "y", "source": "raw"}, ["train", "test", "raw"], ["train", "test"]),

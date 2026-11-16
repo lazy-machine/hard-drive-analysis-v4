@@ -43,7 +43,7 @@ without invalidating checkpoints.
 ```
 dataset.parquet ─► drive_index ─► cohort ─► extract ─► snapshots ─► verify ─► explore
                                                                       │
-                                                                      └─► train_* (7 models) ─► predict ─► evaluate ─► report
+                                                                      └─► train_* (7 models + seeds) ─► predict ─► evaluate ─► report
 ```
 
 | Step | Output | What it does |
