@@ -62,6 +62,6 @@ def pipeline_run(project):
     os.environ.setdefault("HDA_THREADS", "2")
     result = Orchestrator(config.load(project / "pipeline.toml"),
                           Reporter(color=False)).run()
-    failed = {n: o for n, o in result.outcomes.items() if o.status not in ("ran", "cached")}
+    failed = {n: o for n, o in result.outcomes.items() if o.status not in ("ran", "cached", "kept")}
     assert result.ok and not failed, {n: (o.detail, o.output[-3000:]) for n, o in failed.items()}
     return project, result

@@ -10,7 +10,10 @@ import pandas as pd
 
 def test_pipeline_runs_and_caches(pipeline_run):
     project, result = pipeline_run
-    assert all(o.status == "ran" for o in result.outcomes.values())
+    # the synthetic panel is in place, so the steps that build the real one are kept
+    once = {"panel_download", "panel_convert"}
+    assert {n for n, o in result.outcomes.items() if o.status == "kept"} == once
+    assert all(o.status == "ran" for n, o in result.outcomes.items() if n not in once)
     report = project / "build" / "report"
     assert (report / "results.md").read_text().startswith("# Results")
     assert (report / "analysis.md").read_text().startswith("# Can SMART")
@@ -21,7 +24,7 @@ def test_pipeline_runs_and_caches(pipeline_run):
 
     again = Orchestrator(config.load(project / "pipeline.toml"), Reporter(color=False)).run()
     assert again.ok
-    assert {o.status for o in again.outcomes.values()} == {"cached"}
+    assert {o.status for o in again.outcomes.values()} == {"cached", "kept"}
 
 
 def test_gate_passed(pipeline_run):

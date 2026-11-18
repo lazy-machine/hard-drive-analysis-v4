@@ -145,22 +145,24 @@ def month_chunks(start, end, months: int) -> list[tuple[str, str]]:
 
 
 def connect(workdir: Path, name: str, memory_fraction: float = 0.6,
-            database: str = ":memory:") -> duckdb.DuckDBPyConnection:
-    """A DuckDB connection sized to this machine, spilling to build/tmp/<name>.
+            database: str = ":memory:", tmp: Path | None = None,
+            ordered: bool = False) -> duckdb.DuckDBPyConnection:
+    """A DuckDB connection sized to this machine, spilling to `tmp` (build/tmp/<name>).
 
     HDA_MEMORY_FRACTION and HDA_THREADS override the defaults. They change speed and peak
     memory, never results, so they are environment variables and not checkpointed params.
+    `ordered` keeps rows in input order, for a COPY whose file order is the output order.
     """
     fraction = float(os.environ.get("HDA_MEMORY_FRACTION", memory_fraction))
     total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     threads = int(os.environ.get("HDA_THREADS", os.cpu_count() or 4))
-    tmp = workdir / "build" / "tmp" / name
+    tmp = tmp or workdir / "build" / "tmp" / name
     tmp.mkdir(parents=True, exist_ok=True)
     return duckdb.connect(database, config={
         "memory_limit": f"{total * fraction / 2**30:.1f}GiB",
         "threads": threads,
         "temp_directory": str(tmp),
-        "preserve_insertion_order": False,
+        "preserve_insertion_order": ordered,
     })
 
 

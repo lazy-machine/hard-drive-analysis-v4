@@ -12,6 +12,35 @@ name = "hard-drive-analysis"
 # src: the gate is local code, so the runner fingerprints its source
 python_path = ["steps", "src"]
 state_dir = "build/.pipeline"
+# The panel is built once from Backblaze's CSVs (panel_download, panel_convert) and then
+# trusted. While it exists with this sha256 those two steps are kept: no -f, -r, --only or
+# code change reruns them. Keep the hash equal to drive_index's (tests check it).
+fixed = [{ path = "dataset/dataset.parquet", sha256 = "d43984e8200893ebdd1bc739cabff8e05dc759aeb572dc2adb5aaad29e40b556" }]
+
+# -- raw data: run once, never again (README.md, "Raw data") ----------------------------
+#
+# Everything big stays on the download HDD under /srv/downloads: the 28 GiB of zips, the
+# ~12 GB of CSVs of the quarter in progress, DuckDB's spill files and the staged quarters.
+# Only the finished panel goes to dataset/ on the SSD. IO-bound: hours, by design.
+
+[[steps]]
+name = "panel_download"
+description = "Backblaze drive-stats zips, 2016 Q1 to 2025 Q4, to the download HDD"
+function = "raw:download"
+outputs = { zips = "/srv/downloads/backblaze-drive-stats/zips" }
+params = { base_url = "https://f001.backblazeb2.com/file/Backblaze-Hard-Drive-Data", first = "2016Q1", last = "2025Q4" }
+once = true
+
+[[steps]]
+name = "panel_convert"
+description = "The zips' 3,652 daily CSVs to dataset/dataset.parquet, quarter by quarter"
+function = "raw:convert"
+inputs = { zips = "/srv/downloads/backblaze-drive-stats/zips", schema = "config/panel-schema.toml" }
+outputs = { panel = "dataset/dataset.parquet" }
+params = { scratch = "/srv/downloads/backblaze-drive-stats/scratch", scratch_free_gib = 60, panel_free_gib = 30 }
+requires = ["duckdb>=2.0"]
+watch = ["steps/common.py"]
+once = true
 
 # -- data --------------------------------------------------------------------------------
 

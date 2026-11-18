@@ -33,7 +33,7 @@ _INTERRUPT_GRACE = 2.0  # seconds a step gets to print where it was before it is
 
 @dataclass
 class Outcome:
-    status: str  # ran | cached | warned | failed | skipped | would run
+    status: str  # ran | cached | kept | warned | failed | skipped | would run
     detail: str = ""
     duration: float = 0.0
     output: str = ""
@@ -229,12 +229,35 @@ def _run_worker(pipeline: Pipeline, step: Step, log_path: Path,
         return True, summary, output
 
 
+def fixed_health(pipeline: Pipeline, state: checkpoint.State) -> tuple[list[str], list[str]]:
+    """(missing fixed files, problems with the ones that exist).
+
+    Hashes go through the state's cache, so a healthy multi-GB file is read once, not on
+    every run.
+    """
+    missing, problems = [], []
+    for rel, sha in pipeline.fixed:
+        link, path = pipeline.workdir / rel, pipeline.resolve(rel)
+        if link.is_symlink() and not path.exists():
+            # rebuilding would write through the link to wherever it points
+            problems.append(f"{rel} is a broken symlink; remove it to rebuild")
+        elif not path.exists():
+            missing.append(rel)
+        elif not path.is_file():
+            problems.append(f"{rel} is not a file")
+        elif sha and state.hash_file(path) != sha:
+            problems.append(f"{rel} does not match its sha256 in [pipeline].fixed; pin the new "
+                            "sha256, or delete the file to rebuild it")
+    return missing, problems
+
+
 class Orchestrator:
     def __init__(self, pipeline: Pipeline, reporter: Reporter | None = None):
         self.pipeline = pipeline
         self.report = reporter or Reporter()
         self.state = checkpoint.State(pipeline.state_dir)
         self.running_log: Path | None = None  # log of the step in progress, for Ctrl-C
+        self.once: dict[str, tuple[str, str]] = {}  # once step -> verdict for this run
 
     def run(self, only: list[str] | None = None, force: bool = False,
             rerun: list[str] | None = None, dry_run: bool = False) -> RunResult:
@@ -250,9 +273,11 @@ class Orchestrator:
             result.warnings.append(text)
             self.report.warning(text)
         self.state.problems = []
+        self.once = self._once_verdicts()
         issues = preflight(p)
         blocking = {n: e for n, e in issues.items()
-                    if p.step(n).critical and any(s.name == n for s in steps)}
+                    if p.step(n).critical and any(s.name == n for s in steps)
+                    and self.once.get(n, ("",))[0] != "kept"}
         if blocking and not dry_run:
             self.report.preflight_failed(blocking)
             result.halted_by = next(iter(blocking))
@@ -277,6 +302,28 @@ class Orchestrator:
         self.report.footer(result, dry_run)
         return result
 
+    def _once_verdicts(self) -> dict[str, tuple[str, str]]:
+        """What each once step does this run: ("kept" | "failed" | "run", detail).
+
+        Once steps build the fixed files, which take hours to make and are then trusted.
+        While every fixed file is healthy they are kept: no -f, --rerun, --only or changed
+        fingerprint runs them again. A fixed file that exists with the wrong sha256 stops
+        the run instead of being rebuilt: it may be a newer file waiting for its pin, and a
+        rebuild would not match the old pin either. Only a missing file is rebuilt.
+        """
+        if not any(s.once for s in self.pipeline.steps):
+            return {}
+        missing, problems = fixed_health(self.pipeline, self.state)
+        self.state.save()  # persist the hash cache
+        if problems:
+            verdict = ("failed", "once steps never rebuild an existing fixed file: "
+                       + "; ".join(problems))
+        elif missing:
+            verdict = ("run", "")
+        else:
+            verdict = ("kept", "fixed files are healthy; once steps never rerun")
+        return {s.name: verdict for s in self.pipeline.steps if s.once}
+
     def _warn_outside(self, step: Step, selected: set[str], flagged: set[str],
                       result: RunResult, dry_run: bool) -> None:
         """Say when ``--only`` leaves out an upstream step, such as a gate, that isn't current.
@@ -294,6 +341,8 @@ class Orchestrator:
         for other in p.steps:
             if other.name not in ancestors or other.name in selected | flagged:
                 continue
+            if self.once.get(other.name, ("",))[0] == "kept":
+                continue  # not stale: nothing reruns a once step while its files are healthy
             fp = checkpoint.fingerprint(p, other, self.state)
             reason = checkpoint.stale_reason(p, other, self.state, fp)
             pending = [u for u in p.upstream[other.name]
@@ -311,6 +360,13 @@ class Orchestrator:
               forced: bool, dry_run: bool) -> Outcome:
         p = self.pipeline
         bad = "warned" if not step.critical else "failed"
+
+        # 0. once steps: kept, or stopped, by the state of the fixed files, whatever -f says
+        verdict, detail = self.once.get(step.name, ("run", ""))
+        if verdict == "kept":
+            return Outcome("kept", detail)
+        if verdict == "failed":
+            return Outcome(bad, detail)
 
         # 1. verify: upstream steps, then static issues, then inputs present on disk
         broken = [u for u in p.upstream[step.name]

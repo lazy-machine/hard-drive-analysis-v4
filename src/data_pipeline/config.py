@@ -15,6 +15,19 @@ Example::
     requires = ["pandas>=2"]         # packages that must be installed
     critical = true                  # false -> failure is a warning, pipeline continues
     clean_outputs = true             # delete the outputs just before the step runs
+
+Fixed files and ``once`` steps, for raw data that is built one time and never again::
+
+    [pipeline]
+    fixed = [{ path = "data/raw.parquet", sha256 = "<64 hex digits, or empty>" }]
+
+    [[steps]]
+    name = "build_raw"
+    function = "prep:build_raw"
+    outputs = { raw = "data/raw.parquet" }
+    once = true                      # kept while every fixed file is healthy, even with -f
+
+A fixed file is healthy when it exists and, if a sha256 is given, matches it.
 """
 
 from __future__ import annotations
@@ -29,11 +42,13 @@ from typing import Any
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]*$")
 _FUNC_RE = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
 
-_PIPELINE_KEYS = {"name", "workdir", "python_path", "state_dir"}
+_PIPELINE_KEYS = {"name", "workdir", "python_path", "state_dir", "fixed"}
 _STEP_KEYS = {
     "name", "function", "inputs", "outputs", "params", "requires",
     "depends_on", "critical", "timeout", "watch", "env", "description", "clean_outputs",
+    "once",
 }
+_SHA256_RE = re.compile(r"^([0-9a-f]{64})?$")
 
 
 class ConfigError(Exception):
@@ -55,6 +70,8 @@ class Step:
     env: list[str] = field(default_factory=list)
     description: str = ""
     clean_outputs: bool = False
+    # built once: never rerun while the pipeline's fixed files are healthy (see Pipeline.fixed)
+    once: bool = False
 
     @property
     def module(self) -> str:
@@ -75,6 +92,8 @@ class Pipeline:
     steps: list[Step]
     # step name -> names of steps it must run after (explicit + inferred from files)
     upstream: dict[str, list[str]]
+    # files built once and then trusted: (path as written, sha256 or "" for existence only)
+    fixed: list[tuple[str, str]] = field(default_factory=list)
 
     def resolve(self, rel: str) -> Path:
         return (self.workdir / rel).resolve()
@@ -170,6 +189,9 @@ def _parse_step(raw: Any, idx: int) -> Step:
     clean_outputs = raw.get("clean_outputs", False)
     _expect(isinstance(clean_outputs, bool), f"{where}: clean_outputs must be true or false")
 
+    once = raw.get("once", False)
+    _expect(isinstance(once, bool), f"{where}: once must be true or false")
+
     return Step(
         name=name,
         function=func,
@@ -184,7 +206,41 @@ def _parse_step(raw: Any, idx: int) -> Step:
         env=_str_list(raw.get("env", []), f"{where}.env"),
         description=description,
         clean_outputs=clean_outputs,
+        once=once,
     )
+
+
+def _parse_fixed(value: Any) -> list[tuple[str, str]]:
+    where = "[pipeline].fixed"
+    _expect(isinstance(value, list), f"{where} must be a list of {{ path, sha256 }} tables")
+    fixed = []
+    for i, entry in enumerate(value):
+        _expect(isinstance(entry, dict) and set(entry) <= {"path", "sha256"} and "path" in entry,
+                f"{where}[{i}] must be a table with a path and an optional sha256")
+        path, sha = entry["path"], entry.get("sha256", "")
+        _expect(isinstance(path, str) and path and "\0" not in path,
+                f"{where}[{i}].path must be a non-empty path string")
+        _expect(isinstance(sha, str) and bool(_SHA256_RE.match(sha)),
+                f"{where}[{i}].sha256 must be 64 lowercase hex digits, or empty")
+        fixed.append((path, sha))
+    return fixed
+
+
+def _check_once(steps: list[Step], fixed: list[tuple[str, str]], resolve) -> None:
+    """A once step needs fixed files to be kept by, and only once steps may write them."""
+    once = [s.name for s in steps if s.once]
+    _expect(not once or fixed,
+            f"step(s) {', '.join(once)} set once = true, but [pipeline].fixed lists no file "
+            "to keep them by")
+    paths = [resolve(rel) for rel, _ in fixed]
+    _expect(len(set(paths)) == len(paths), "[pipeline].fixed lists a file twice")
+    for s in steps:
+        for rel in s.outputs.values():
+            out = resolve(rel)
+            for (fixed_rel, _), p in zip(fixed, paths, strict=True):
+                _expect(s.once or not overlaps(out, p),
+                        f"step '{s.name}' writes '{rel}', which overlaps the fixed file "
+                        f"'{fixed_rel}': only a once step may build a fixed file")
 
 
 def overlaps(a: Path, b: Path) -> bool:
@@ -292,6 +348,8 @@ def load(path: str | Path) -> Pipeline:
 
     resolve = lambda rel: (workdir / rel).resolve()  # noqa: E731
     upstream = _build_graph(steps, resolve)
+    fixed = _parse_fixed(meta.get("fixed", []))
+    _check_once(steps, fixed, resolve)
     pipeline = Pipeline(
         name=meta.get("name", path.stem),
         path=path,
@@ -300,6 +358,7 @@ def load(path: str | Path) -> Pipeline:
         state_dir=state_dir,
         steps=_topological(steps, upstream),
         upstream=upstream,
+        fixed=fixed,
     )
     for s in steps:
         for rel in s.outputs.values() if s.clean_outputs else []:
