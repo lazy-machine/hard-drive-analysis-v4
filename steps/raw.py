@@ -35,13 +35,13 @@ from pathlib import Path, PurePosixPath
 from common import Progress, connect, q, scalar
 
 # Bump when the conversion changes, so per-quarter files staged by older code are redone.
-CONVERTER_VERSION = 4
+CONVERTER_VERSION = 5
 _DAY_CSV = re.compile(r"^\d{4}-\d{2}-\d{2}\.csv$")
 _QUARTER = re.compile(r"^(\d{4})Q([1-4])$")
 _CHUNK = 8 * 2**20
 
 
-_BIGINT = (-2**63, 2**63 - 1)
+_BIGINT = (Decimal(-2**63), Decimal(2**63 - 1))
 
 
 def exact_bigint(text: str | None) -> int | None:
@@ -60,10 +60,10 @@ def exact_bigint(text: str | None) -> int | None:
         d = Decimal(text)
     except InvalidOperation:
         return None
-    if not d.is_finite() or d != d.to_integral_value():
+    # bounds before int(): int(Decimal("1e100000")) would build a 100,000-digit number
+    if not d.is_finite() or not _BIGINT[0] <= d <= _BIGINT[1] or d != d.to_integral_value():
         return None
-    n = int(d)
-    return n if _BIGINT[0] <= n <= _BIGINT[1] else None
+    return int(d)
 
 
 def quarters(first: str, last: str) -> list[str]:
@@ -241,7 +241,7 @@ def _stage_quarter(con, path: Path, key: str, columns: dict[str, str], stage_dir
             # get their value from Python, so nothing re-parses them
             return (f"CASE WHEN {col} IS NULL THEN NULL "
                     f"WHEN regexp_full_match(trim({col}), '[+-]?[0-9]+') "
-                    f"THEN CAST({col} AS BIGINT) "
+                    f"THEN CAST(trim({col}) AS BIGINT) "
                     f"ELSE coalesce(hda_bigint({col}), error('{path.name}: {name} = ' || {col} "
                     f"|| ' is not an integer that fits BIGINT')) END AS {col}")
         return f'CAST({col} AS {typ}) AS {col}'  # strict: a bad value stops the run

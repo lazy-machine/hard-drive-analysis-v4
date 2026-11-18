@@ -86,8 +86,9 @@ def test_exact_bigint():
              "-0.9223372036854775808e19": -2**63}
     assert {t: raw.exact_bigint(t) for t in cases} == cases
     for t in ["1.5", "1e-3", "0x10", "1_000", "nan", "-inf", "", "a",
-              "0.9223372036854775808e19", "-9223372036854775809.0"]:
+              "0.9223372036854775808e19", "-9223372036854775809.0", "1e100000", "-1e999999999"]:
         assert raw.exact_bigint(t) is None, t
+    assert raw.exact_bigint("\u00a07\u00a0") == 7  # non-breaking spaces
 
 
 def test_quarters():
@@ -222,7 +223,7 @@ def test_fraction_in_an_integer_column_stops(tmp_path, source, value):
 
 def test_integral_text_in_an_integer_column_converts(tmp_path, source):
     values = ["12", "-3", "+4", "12.00", " 7 ", "2.81472E+14", "1.5e1", "1.50e1", "10e-1",
-              "1.0e0", "0e5", "-0.0", "92233720368547758070e-1"]
+              "1.0e0", "0e5", "-0.0", "92233720368547758070e-1", "\u00a08\u00a0"]
     rows = "".join(f"2016-04-01,S{i},M1,4000787030016,0,100,0,{v}\n"
                    for i, v in enumerate(values))
     write_zip(source / "data_Q2_2016.zip", {"2016-04-01.csv": HEAD_2016 + "\n" + rows}, HEAD_2016)
@@ -230,9 +231,9 @@ def test_integral_text_in_an_integer_column_converts(tmp_path, source):
     out, _ = convert(tmp_path, zips)
     got = duckdb.connect().execute(f"SELECT smart_9_raw FROM read_parquet('{out}') "
                                    "WHERE date = '2016-04-01' ORDER BY serial_number").fetchall()
-    # serials sort as S0, S1, S10, S11, S12, S2, ...
-    assert [r[0] for r in got] == [12, -3, 0, 0, 2**63 - 1, 4, 12, 7, 281472000000000, 15, 15,
-                                   1, 1]
+    # serials sort as S0, S1, S10, S11, S12, S13, S2, ...
+    assert [r[0] for r in got] == [12, -3, 0, 0, 2**63 - 1, 8, 4, 12, 7, 281472000000000, 15,
+                                   15, 1, 1]
 
 
 def test_unparseable_date_stops(tmp_path, source):
