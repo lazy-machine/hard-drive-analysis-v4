@@ -24,9 +24,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-n", "--dry-run", action="store_true",
                     help="verify and show what would run, without running anything")
     ap.add_argument("-f", "--force", action="store_true",
-                    help="ignore all checkpoints and re-run every step")
+                    help="ignore all checkpoints and re-run every step, except once steps "
+                         "while the fixed files are healthy")
     ap.add_argument("-r", "--rerun", action="append", default=[], metavar="STEP",
-                    help="ignore the checkpoint of STEP (repeatable)")
+                    help="ignore the checkpoint of STEP (repeatable; a kept once step stays kept)")
     ap.add_argument("-o", "--only", nargs="+", metavar="STEP",
                     help="run only these steps (their inputs must already exist)")
     ap.add_argument("-v", "--verbose", action="store_true",

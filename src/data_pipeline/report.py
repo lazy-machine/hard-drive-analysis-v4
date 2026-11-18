@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 _STYLE = {
     "ran": ("✓", "ran", "32"),
     "cached": ("↷", "cached", "2"),
+    "kept": ("■", "kept", "2"),
     "would run": ("•", "will run", "36"),
     "warned": ("⚠", "warning", "33"),
     "skipped": ("–", "skipped", "33"),
@@ -118,7 +119,7 @@ class Reporter:
         counts: dict[str, int] = {}
         for o in result.outcomes.values():
             counts[o.status] = counts.get(o.status, 0) + 1
-        names = {"ran": "ran", "cached": "cached", "would run": "to run",
+        names = {"ran": "ran", "cached": "cached", "kept": "kept", "would run": "to run",
                  "warned": "warning(s)", "skipped": "skipped", "failed": "failed"}
         counts["warned"] = counts.get("warned", 0) + len(result.warnings)
         parts = [f"{counts[k]} {v}" for k, v in names.items() if counts.get(k)]
