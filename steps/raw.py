@@ -34,10 +34,17 @@ from pathlib import Path, PurePosixPath
 from common import Progress, connect, q, scalar
 
 # Bump when the conversion changes, so per-quarter files staged by older code are redone.
-CONVERTER_VERSION = 1
+CONVERTER_VERSION = 2
 _DAY_CSV = re.compile(r"^\d{4}-\d{2}-\d{2}\.csv$")
 _QUARTER = re.compile(r"^(\d{4})Q([1-4])$")
 _CHUNK = 8 * 2**20
+# Whether text is an integer, judged on the digits (a DOUBLE turns 1.0000000000000001 into 1):
+# 12, 12.00, or scientific notation with no more decimals than its exponent (2.81472E+14).
+_INTEGRAL_SQL = (
+    "(regexp_full_match({x}, '[+-]?[0-9]+(\\.0*)?') OR "
+    "(regexp_full_match({x}, '[+-]?[0-9]+(\\.[0-9]*)?[eE]\\+?[0-9]+') AND "
+    "length(regexp_extract({x}, '\\.([0-9]*)', 1)) <= "
+    "CAST(regexp_extract({x}, '[eE]\\+?([0-9]+)', 1) AS INTEGER)))")
 
 
 def quarters(first: str, last: str) -> list[str]:
@@ -210,8 +217,8 @@ def _stage_quarter(con, path: Path, key: str, columns: dict[str, str], stage_dir
             return f'"{name}"'
         col = f'"{name}"'
         if typ == "BIGINT":  # CAST rounds '1.5' to 2; a counter with a fraction stops the run
-            return (f"CASE WHEN {col} IS NULL OR CAST({col} AS DOUBLE) = "
-                    f"floor(CAST({col} AS DOUBLE)) THEN CAST({col} AS BIGINT) ELSE "
+            return (f"CASE WHEN {col} IS NULL OR {_INTEGRAL_SQL.format(x=f'trim({col})')} "
+                    f"THEN CAST({col} AS BIGINT) ELSE "
                     f"error('{path.name}: {name} = ' || {col} || ' is not an integer') END "
                     f"AS {col}")
         return f'CAST({col} AS {typ}) AS {col}'  # strict: a bad value stops the run

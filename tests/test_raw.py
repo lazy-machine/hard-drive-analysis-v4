@@ -193,17 +193,30 @@ def test_bad_value_in_a_typed_column_stops(tmp_path, source):
         "2016-04-01.csv": f"{HEAD_2016}\n2016-04-01,A,M1,4000787030016,0,100,0,lots\n"},
         HEAD_2016)
     zips, _ = download(tmp_path, source)
-    with pytest.raises(duckdb.ConversionException):
+    with pytest.raises(duckdb.Error, match="smart_9_raw = lots is not an integer"):
         convert(tmp_path, zips)
 
 
-def test_fraction_in_an_integer_column_stops(tmp_path, source):
+@pytest.mark.parametrize("value", ["1.5", "1.0000000000000001", "1.5E+0", "1e-3", "0x10"])
+def test_fraction_in_an_integer_column_stops(tmp_path, source, value):
     write_zip(source / "data_Q2_2016.zip", {
-        "2016-04-01.csv": f"{HEAD_2016}\n2016-04-01,A,M1,4000787030016,0,100,0,1.5\n"},
+        "2016-04-01.csv": f"{HEAD_2016}\n2016-04-01,A,M1,4000787030016,0,100,0,{value}\n"},
         HEAD_2016)
     zips, _ = download(tmp_path, source)
-    with pytest.raises(duckdb.Error, match="smart_9_raw = 1.5 is not an integer"):
+    with pytest.raises(duckdb.Error, match=f"smart_9_raw = {re.escape(value)} is not an integer"):
         convert(tmp_path, zips)
+
+
+def test_integral_text_in_an_integer_column_converts(tmp_path, source):
+    values = ["12", "-3", "+4", "12.00", " 7 ", "2.81472E+14", "1.5e1"]
+    rows = "".join(f"2016-04-01,S{i},M1,4000787030016,0,100,0,{v}\n"
+                   for i, v in enumerate(values))
+    write_zip(source / "data_Q2_2016.zip", {"2016-04-01.csv": HEAD_2016 + "\n" + rows}, HEAD_2016)
+    zips, _ = download(tmp_path, source)
+    out, _ = convert(tmp_path, zips)
+    got = duckdb.connect().execute(f"SELECT smart_9_raw FROM read_parquet('{out}') "
+                                   "WHERE date = '2016-04-01'").fetchall()
+    assert [r[0] for r in got] == [12, -3, 4, 12, 7, 281472000000000, 15]
 
 
 def test_unparseable_date_stops(tmp_path, source):
