@@ -94,6 +94,10 @@ def test_download_writes_manifest_and_resumes(tmp_path, source):
     assert summary["zips"] == 2
     manifest = json.loads((zips / "manifest.json").read_text())
     assert [e["name"] for e in manifest["zips"]] == ["data_Q1_2016.zip", "data_Q2_2016.zip"]
+    good = (zips / "data_Q1_2016.zip").read_bytes()
+    (zips / "data_Q1_2016.zip").write_bytes(b"x" * len(good))  # right size, not a zip
+    download(tmp_path, source)
+    assert (zips / "data_Q1_2016.zip").read_bytes() == good
     mtime = (zips / "data_Q1_2016.zip").stat().st_mtime_ns
     (zips / "data_Q2_2016.zip").write_bytes(b"truncated")
     (zips / "data_Q2_2016.zip.part").write_bytes(b"left by a crash")
@@ -190,6 +194,15 @@ def test_bad_value_in_a_typed_column_stops(tmp_path, source):
         HEAD_2016)
     zips, _ = download(tmp_path, source)
     with pytest.raises(duckdb.ConversionException):
+        convert(tmp_path, zips)
+
+
+def test_fraction_in_an_integer_column_stops(tmp_path, source):
+    write_zip(source / "data_Q2_2016.zip", {
+        "2016-04-01.csv": f"{HEAD_2016}\n2016-04-01,A,M1,4000787030016,0,100,0,1.5\n"},
+        HEAD_2016)
+    zips, _ = download(tmp_path, source)
+    with pytest.raises(duckdb.Error, match="smart_9_raw = 1.5 is not an integer"):
         convert(tmp_path, zips)
 
 

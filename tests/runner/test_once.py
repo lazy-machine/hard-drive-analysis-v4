@@ -140,3 +140,36 @@ def test_fixed_is_optional(tmp_path):
         outputs = { dst = "out/upper.txt" }
     """))
     assert config.load(cfg).fixed == []
+
+
+def test_only_without_once_steps_never_hashes_the_fixed_files(tmp_path, monkeypatch):
+    from data_pipeline import orchestrator
+    cfg = make(tmp_path, BUILD, fixed())
+    run(cfg)
+
+    def boom(*a, **k):
+        raise AssertionError("fixed files hashed for a run without once steps")
+
+    monkeypatch.setattr(orchestrator, "fixed_health", boom)
+    r, out = run(cfg, only=["use"], force=True)
+    assert r.ok and statuses(r) == {"use": "ran"}, out
+
+
+def test_partly_missing_fixed_set_stops_instead_of_overwriting(tmp_path):
+    two = 'fixed = [{ path = "data/panel.txt" }, { path = "data/other.txt" }]'
+    cfg = make(tmp_path, BUILD, two)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "other.txt").write_text("healthy")
+    r, out = run(cfg, force=True)
+    assert not r.ok and r.halted_by == "fetch" and "missing while the other" in out
+    assert not (tmp_path / "data" / "panel.txt").exists()
+    assert (tmp_path / "data" / "other.txt").read_text() == "healthy"
+
+
+def test_bad_pin_fails_even_a_non_critical_once_step(tmp_path):
+    steps = BUILD.replace('params = { v = "zips" }', 'params = { v = "zips" }\ncritical = false')
+    cfg = make(tmp_path, steps, fixed("0" * 64))
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "panel.txt").write_text("other")
+    r, _ = run(cfg)
+    assert not r.ok and r.outcomes["fetch"].status == "failed"

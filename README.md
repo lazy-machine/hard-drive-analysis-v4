@@ -96,6 +96,8 @@ and rebuilt from the public data. They are meant to run once. These choices are 
   `config/panel-schema.toml` to the ones of the panel all results so far came from, so the
   rebuild is a drop-in replacement and no type depends on DuckDB's guessing. A CSV column
   missing from that file, or a value that does not fit its type, stops the conversion.
+- **Reproducible.** The final file is written by one thread, so the same zips give the
+  same bytes and the same sha256 (a parallel write splits row groups differently each run).
 - **Resumable.** Complete zips are not downloaded again, and converted quarters are reused,
   so an interrupted run picks up where it stopped.
 - **Complete.** Every day of each quarter must have its CSV (a header-only day counts), so

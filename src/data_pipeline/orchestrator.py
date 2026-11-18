@@ -273,7 +273,7 @@ class Orchestrator:
             result.warnings.append(text)
             self.report.warning(text)
         self.state.problems = []
-        self.once = self._once_verdicts()
+        self.once = self._once_verdicts(steps)
         issues = preflight(p)
         blocking = {n: e for n, e in issues.items()
                     if p.step(n).critical and any(s.name == n for s in steps)
@@ -302,18 +302,24 @@ class Orchestrator:
         self.report.footer(result, dry_run)
         return result
 
-    def _once_verdicts(self) -> dict[str, tuple[str, str]]:
+    def _once_verdicts(self, steps: list[Step]) -> dict[str, tuple[str, str]]:
         """What each once step does this run: ("kept" | "failed" | "run", detail).
 
         Once steps build the fixed files, which take hours to make and are then trusted.
         While every fixed file is healthy they are kept: no -f, --rerun, --only or changed
         fingerprint runs them again. A fixed file that exists with the wrong sha256 stops
         the run instead of being rebuilt: it may be a newer file waiting for its pin, and a
-        rebuild would not match the old pin either. Only a missing file is rebuilt.
+        rebuild would not match the old pin either. Only a missing file is rebuilt, and only
+        when every fixed file is missing: a once step must never overwrite a healthy one.
+        Nothing is hashed unless a once step is selected (--only may leave them all out).
         """
-        if not any(s.once for s in self.pipeline.steps):
+        once = [s.name for s in steps if s.once]
+        if not once:
             return {}
         missing, problems = fixed_health(self.pipeline, self.state)
+        if missing and len(missing) < len(self.pipeline.fixed):
+            problems.append(f"{', '.join(missing)} missing while the other fixed files exist; "
+                            "move those away too to rebuild them together")
         self.state.save()  # persist the hash cache
         if problems:
             verdict = ("failed", "once steps never rebuild an existing fixed file: "
@@ -322,7 +328,7 @@ class Orchestrator:
             verdict = ("run", "")
         else:
             verdict = ("kept", "fixed files are healthy; once steps never rerun")
-        return {s.name: verdict for s in self.pipeline.steps if s.once}
+        return dict.fromkeys(once, verdict)
 
     def _warn_outside(self, step: Step, selected: set[str], flagged: set[str],
                       result: RunResult, dry_run: bool) -> None:
@@ -341,8 +347,8 @@ class Orchestrator:
         for other in p.steps:
             if other.name not in ancestors or other.name in selected | flagged:
                 continue
-            if self.once.get(other.name, ("",))[0] == "kept":
-                continue  # not stale: nothing reruns a once step while its files are healthy
+            if other.once:
+                continue  # not stale in this sense: the fixed files decide when they run
             fp = checkpoint.fingerprint(p, other, self.state)
             reason = checkpoint.stale_reason(p, other, self.state, fp)
             pending = [u for u in p.upstream[other.name]
@@ -366,7 +372,7 @@ class Orchestrator:
         if verdict == "kept":
             return Outcome("kept", detail)
         if verdict == "failed":
-            return Outcome(bad, detail)
+            return Outcome("failed", detail)  # even if not critical: the documented stop
 
         # 1. verify: upstream steps, then static issues, then inputs present on disk
         broken = [u for u in p.upstream[step.name]

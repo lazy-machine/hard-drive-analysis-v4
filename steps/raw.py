@@ -94,7 +94,8 @@ def _fetch(url: str, dest: Path, log, attempts: int = 4) -> tuple[int, bool]:
         try:
             with urllib.request.urlopen(request, timeout=60) as resp:
                 length = int(resp.headers.get("Content-Length") or -1)
-                if length >= 0 and dest.is_file() and dest.stat().st_size == length:
+                if length >= 0 and dest.is_file() and dest.stat().st_size == length \
+                        and zipfile.is_zipfile(dest):
                     return length, False
                 part = dest.with_name(dest.name + ".part")
                 with part.open("wb") as fh:
@@ -160,6 +161,10 @@ def convert(ctx):
             f"{'(staged earlier)' if reused else f'in {time.perf_counter() - t0:.0f}s'}")
 
     log(f"writing {rows:,} rows to {out}")
+    # One thread: parallel writers cut row groups by timing, so the same zips gave panels with
+    # the same rows but different bytes, and the sha256 pin could never be reproduced. On
+    # real data this costs ~100 s per 40M rows (~30 min for the panel), against hours of IO.
+    con.execute("SET threads = 1")
     con.sql(f"""COPY (SELECT * FROM read_parquet([{', '.join(q(p) for p in staged)}]))
                 TO {q(part)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 122880)""")
     _check_panel(con, part, columns, rows)
@@ -203,7 +208,13 @@ def _stage_quarter(con, path: Path, key: str, columns: dict[str, str], stage_dir
                     "try_strptime(date, '%m/%d/%y'))::DATE AS date")
         if typ == "VARCHAR":
             return f'"{name}"'
-        return f'CAST("{name}" AS {typ}) AS "{name}"'  # strict: a bad value stops the run
+        col = f'"{name}"'
+        if typ == "BIGINT":  # CAST rounds '1.5' to 2; a counter with a fraction stops the run
+            return (f"CASE WHEN {col} IS NULL OR CAST({col} AS DOUBLE) = "
+                    f"floor(CAST({col} AS DOUBLE)) THEN CAST({col} AS BIGINT) ELSE "
+                    f"error('{path.name}: {name} = ' || {col} || ' is not an integer') END "
+                    f"AS {col}")
+        return f'CAST({col} AS {typ}) AS {col}'  # strict: a bad value stops the run
 
     select = ", ".join(expr(n, t) for n, t in columns.items())
     part = dest.with_name(dest.name + ".part")
