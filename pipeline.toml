@@ -15,7 +15,7 @@ state_dir = "build/.pipeline"
 # The panel is built once from Backblaze's CSVs (panel_download, panel_convert) and then
 # trusted. While it exists with this sha256 those two steps are kept: no -f, -r, --only or
 # code change reruns them. Keep the hash equal to drive_index's (tests check it).
-fixed = [{ path = "dataset/dataset.parquet", sha256 = "d43984e8200893ebdd1bc739cabff8e05dc759aeb572dc2adb5aaad29e40b556" }]
+fixed = [{ path = "dataset/dataset.parquet", sha256 = "a84f5d5501b8619a8d8db01216ab83bf941611ba5246af6865323d6e162187d9" }]
 
 # -- raw data: run once, never again (README.md, "Raw data") ----------------------------
 #
@@ -50,7 +50,7 @@ description = "One row per drive: model, capacity, observed span, first failure 
 function = "drives:drive_index"
 inputs = { panel = "dataset/dataset.parquet" }
 outputs = { drives = "build/drives.parquet" }
-params = { chunk_months = 1, sha256 = "d43984e8200893ebdd1bc739cabff8e05dc759aeb572dc2adb5aaad29e40b556" }
+params = { chunk_months = 1, sha256 = "a84f5d5501b8619a8d8db01216ab83bf941611ba5246af6865323d6e162187d9" }
 requires = ["duckdb>=2.0"]
 watch = ["steps/common.py"]
 
