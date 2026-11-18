@@ -139,13 +139,20 @@ def test_rebuild_is_byte_identical(tmp_path, source):
     assert first["sha256"] == second["sha256"]
 
 
-def test_stale_part_does_not_count_against_free_space(tmp_path, source):
+def test_stale_part_does_not_count_against_free_space(tmp_path, source, monkeypatch):
     zips, _ = download(tmp_path, source)
     part = tmp_path / "dataset" / ".dataset.parquet.part"
     part.parent.mkdir()
     part.write_bytes(b"left by a crash")
+    checked = []
+
+    def require_free(path, gib):
+        assert not part.exists(), "free space checked while a crashed run's part remains"
+        checked.append(path)
+
+    monkeypatch.setattr(raw, "_require_free", require_free)
     convert(tmp_path, zips)
-    assert not part.exists()
+    assert len(checked) == 2 and not part.exists()
 
 
 def test_missing_day_stops(tmp_path, source):

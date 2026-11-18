@@ -1,7 +1,8 @@
 # Column order and types of dataset/dataset.parquet. panel_convert writes exactly these.
 #
-# Taken from the panel every result so far was computed on: DuckDB 1.5.5 read all 3,652 daily
-# CSVs at once (read_csv, union_by_name) and guessed each column's type. The guesses are odd
+# Taken from the panel every result so far was computed on: DuckDB 1.5.5 read all 3,653 daily
+# CSVs at once (read_csv, union_by_name) and guessed each column's type. Its `filename` holds
+# 3,652 of them: 2017-01-30.csv has only a header, so no row names it. The guesses are odd
 # (sparse SMART columns are VARCHAR, a few raw counters DOUBLE), but pinning them keeps the
 # rebuilt panel a drop-in replacement, and a type that no longer comes from sniffing cannot
 # change with the DuckDB version. Later steps TRY_CAST every SMART column to DOUBLE anyway.

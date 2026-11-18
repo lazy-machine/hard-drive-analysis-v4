@@ -147,8 +147,10 @@ def convert(ctx):
         path = zips / entry["name"]
         if path.stat().st_size != entry["bytes"]:
             raise ValueError(f"{path}: size differs from manifest.json; rerun panel_download")
-        # mtime too: a zip replaced by one of the same size must not reuse the old stage
-        key = json.dumps({"zip": entry, "mtime_ns": path.stat().st_mtime_ns,
+        # mtime and ctime too: a zip replaced by one of the same size must not reuse the old
+        # stage, even when the copy kept the old mtime (ctime can't be set from user space)
+        st = path.stat()
+        key = json.dumps({"zip": entry, "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns,
                           "schema": schema_sha, "converter": CONVERTER_VERSION}, sort_keys=True)
         t0 = time.perf_counter()
         dest, n, reused = _stage_quarter(con, path, key, columns, stage_dir, csv_root)
