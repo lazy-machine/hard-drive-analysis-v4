@@ -35,23 +35,35 @@ from pathlib import Path, PurePosixPath
 from common import Progress, connect, q, scalar
 
 # Bump when the conversion changes, so per-quarter files staged by older code are redone.
-CONVERTER_VERSION = 3
+CONVERTER_VERSION = 4
 _DAY_CSV = re.compile(r"^\d{4}-\d{2}-\d{2}\.csv$")
 _QUARTER = re.compile(r"^(\d{4})Q([1-4])$")
 _CHUNK = 8 * 2**20
 
 
-def integral(text: str) -> bool:
-    """Whether CSV text is a whole number, judged exactly (a DOUBLE turns 1.0000000000000001
-    into 1): 12, 12.00, 2.81472E+14 and 10e-1 are; 1.5, 1e-3 and 0x10 are not."""
+_BIGINT = (-2**63, 2**63 - 1)
+
+
+def exact_bigint(text: str | None) -> int | None:
+    """The whole number CSV text spells, or None if it has a fraction or does not fit BIGINT.
+
+    Judged with Decimal and returned as is, never re-parsed: a DOUBLE turns
+    1.0000000000000001 into 1, and DuckDB's own cast rounds 0.9223372036854775808e19.
+    12.00, 2.81472E+14 and 10e-1 are whole numbers; 1.5, 1e-3 and 0x10 are not.
+    """
+    if text is None:
+        return None
     text = text.strip()
-    if "_" in text:  # Decimal reads 1_000; DuckDB's cast would not
-        return False
+    if "_" in text:  # Decimal reads 1_000; a CSV counter never means that
+        return None
     try:
         d = Decimal(text)
     except InvalidOperation:
-        return False
-    return d.is_finite() and d == d.to_integral_value()
+        return None
+    if not d.is_finite() or d != d.to_integral_value():
+        return None
+    n = int(d)
+    return n if _BIGINT[0] <= n <= _BIGINT[1] else None
 
 
 def quarters(first: str, last: str) -> list[str]:
@@ -156,7 +168,8 @@ def convert(ctx):
     manifest = json.loads((zips / "manifest.json").read_text())
     # the spill folder is on the HDD: DuckDB asks for tens of GB of it, which the SSD can't spare
     con = connect(ctx.workdir, ctx.name, tmp=spill, ordered=True)
-    con.create_function("hda_integral", integral, ["VARCHAR"], "BOOLEAN")
+    con.create_function("hda_bigint", exact_bigint, ["VARCHAR"], "BIGINT",
+                        null_handling="special")  # None means "not an integer"
     schema_sha = hashlib.sha256(schema_bytes).hexdigest()
     staged, rows = [], 0
     for i, entry in enumerate(manifest["zips"], 1):
@@ -224,11 +237,13 @@ def _stage_quarter(con, path: Path, key: str, columns: dict[str, str], stage_dir
             return f'"{name}"'
         col = f'"{name}"'
         if typ == "BIGINT":  # CAST rounds '1.5' to 2; a counter with a fraction stops the run
-            # plain digits take the fast path; only the rare other forms reach Python
-            return (f"CASE WHEN {col} IS NULL OR regexp_full_match(trim({col}), '[+-]?[0-9]+') "
-                    f"OR hda_integral({col}) THEN CAST({col} AS BIGINT) ELSE "
-                    f"error('{path.name}: {name} = ' || {col} || ' is not an integer') END "
-                    f"AS {col}")
+            # plain digits take DuckDB's cast (exact; overflow raises); the rare other forms
+            # get their value from Python, so nothing re-parses them
+            return (f"CASE WHEN {col} IS NULL THEN NULL "
+                    f"WHEN regexp_full_match(trim({col}), '[+-]?[0-9]+') "
+                    f"THEN CAST({col} AS BIGINT) "
+                    f"ELSE coalesce(hda_bigint({col}), error('{path.name}: {name} = ' || {col} "
+                    f"|| ' is not an integer that fits BIGINT')) END AS {col}")
         return f'CAST({col} AS {typ}) AS {col}'  # strict: a bad value stops the run
 
     select = ", ".join(expr(n, t) for n, t in columns.items())

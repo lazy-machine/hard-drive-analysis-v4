@@ -80,9 +80,14 @@ def few_threads(monkeypatch):
     monkeypatch.setenv("HDA_THREADS", "2")
 
 
-def test_integral():
-    assert all(map(raw.integral, ["0", "-7", "12.00", "2.81472E+14", "10e-1", " 3 ", "1.50e1"]))
-    assert not any(map(raw.integral, ["1.5", "1e-3", "0x10", "1_000", "nan", "-inf", "", "a"]))
+def test_exact_bigint():
+    cases = {"0": 0, "-7": -7, "12.00": 12, "2.81472E+14": 281472000000000, "10e-1": 1,
+             " 3 ": 3, "1.50e1": 15, "92233720368547758070e-1": 2**63 - 1,
+             "-0.9223372036854775808e19": -2**63}
+    assert {t: raw.exact_bigint(t) for t in cases} == cases
+    for t in ["1.5", "1e-3", "0x10", "1_000", "nan", "-inf", "", "a",
+              "0.9223372036854775808e19", "-9223372036854775809.0"]:
+        assert raw.exact_bigint(t) is None, t
 
 
 def test_quarters():
@@ -205,19 +210,19 @@ def test_bad_value_in_a_typed_column_stops(tmp_path, source):
 
 
 @pytest.mark.parametrize("value", ["1.5", "1.0000000000000001", "1.5E+0", "1e-3", "0x10",
-                                   "1_000", "nan", "inf", "12abc"])
+                                   "1_000", "nan", "inf", "12abc", "0.9223372036854775808e19"])
 def test_fraction_in_an_integer_column_stops(tmp_path, source, value):
     write_zip(source / "data_Q2_2016.zip", {
         "2016-04-01.csv": f"{HEAD_2016}\n2016-04-01,A,M1,4000787030016,0,100,0,{value}\n"},
         HEAD_2016)
     zips, _ = download(tmp_path, source)
-    with pytest.raises(duckdb.Error, match=f"smart_9_raw = {re.escape(value)} is not an integer"):
+    with pytest.raises(duckdb.Error, match=f"smart_9_raw = {re.escape(value)} is not an integer"):  # noqa: E501
         convert(tmp_path, zips)
 
 
 def test_integral_text_in_an_integer_column_converts(tmp_path, source):
     values = ["12", "-3", "+4", "12.00", " 7 ", "2.81472E+14", "1.5e1", "1.50e1", "10e-1",
-              "1.0e0", "0e5", "-0.0"]
+              "1.0e0", "0e5", "-0.0", "92233720368547758070e-1"]
     rows = "".join(f"2016-04-01,S{i},M1,4000787030016,0,100,0,{v}\n"
                    for i, v in enumerate(values))
     write_zip(source / "data_Q2_2016.zip", {"2016-04-01.csv": HEAD_2016 + "\n" + rows}, HEAD_2016)
@@ -225,8 +230,9 @@ def test_integral_text_in_an_integer_column_converts(tmp_path, source):
     out, _ = convert(tmp_path, zips)
     got = duckdb.connect().execute(f"SELECT smart_9_raw FROM read_parquet('{out}') "
                                    "WHERE date = '2016-04-01' ORDER BY serial_number").fetchall()
-    # serials sort as S0, S1, S10, S11, S2, ...
-    assert [r[0] for r in got] == [12, -3, 0, 0, 4, 12, 7, 281472000000000, 15, 15, 1, 1]
+    # serials sort as S0, S1, S10, S11, S12, S2, ...
+    assert [r[0] for r in got] == [12, -3, 0, 0, 2**63 - 1, 4, 12, 7, 281472000000000, 15, 15,
+                                   1, 1]
 
 
 def test_unparseable_date_stops(tmp_path, source):
