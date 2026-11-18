@@ -246,8 +246,8 @@ def fixed_health(pipeline: Pipeline, state: checkpoint.State) -> tuple[list[str]
         elif not path.is_file():
             problems.append(f"{rel} is not a file")
         elif sha and state.hash_file(path) != sha:
-            problems.append(f"{rel} does not match its sha256 in [pipeline].fixed; pin the new "
-                            "sha256, or delete the file to rebuild it")
+            problems.append(f"{rel} does not match its sha256 in [pipeline].fixed; if the "
+                            "file is new, pin its sha256; delete it only if it is damaged")
     return missing, problems
 
 

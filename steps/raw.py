@@ -1,6 +1,6 @@
 """Build dataset/dataset.parquet from Backblaze's quarterly drive-stats zips. Run once.
 
-The raw panel is about 250 GB of daily CSVs (3,652 of them for 2016-2025), which does not
+The raw panel is about 250 GB of daily CSVs (3,653 of them for 2016-2025), which does not
 fit on the SSD next to everything else, so these steps keep every large file on the
 download disk (an HDD): the zips, the CSVs of the quarter being converted, DuckDB's spill
 files and the per-quarter parquet files. Only the finished panel (about 23 GB) is written
@@ -28,6 +28,7 @@ import time
 import tomllib
 import urllib.request
 import zipfile
+from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
 
 from common import Progress, connect, q, scalar
@@ -120,8 +121,8 @@ def convert(ctx):
     One quarter at a time: unzip its CSVs to the scratch folder, convert them to a staged
     parquet file there, delete the CSVs. A staged quarter is reused when its zip, schema
     and CONVERTER_VERSION are unchanged, so a failed run resumes. Then the staged files
-    are concatenated in date order into dataset/dataset.parquet, through a temporary file
-    renamed into place: the rename replaces a symlink there rather than writing through it.
+    are concatenated in file order (quarter, then day) into dataset/dataset.parquet,
+    through a temporary file renamed into place.
     """
     log = Progress(ctx)
     zips, out = ctx.inputs["zips"], ctx.outputs["panel"]
@@ -132,6 +133,8 @@ def convert(ctx):
     for d in (stage_dir, csv_root, spill):
         d.mkdir(parents=True, exist_ok=True)
     out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_name(f".{out.name}.part")
+    part.unlink(missing_ok=True)  # a crashed run's 23 GB would count against the free space
     _require_free(scratch, ctx.params.get("scratch_free_gib", 0))
     _require_free(out.parent, ctx.params.get("panel_free_gib", 0))
 
@@ -144,8 +147,9 @@ def convert(ctx):
         path = zips / entry["name"]
         if path.stat().st_size != entry["bytes"]:
             raise ValueError(f"{path}: size differs from manifest.json; rerun panel_download")
-        key = json.dumps({"zip": entry, "schema": schema_sha, "converter": CONVERTER_VERSION},
-                         sort_keys=True)
+        # mtime too: a zip replaced by one of the same size must not reuse the old stage
+        key = json.dumps({"zip": entry, "mtime_ns": path.stat().st_mtime_ns,
+                          "schema": schema_sha, "converter": CONVERTER_VERSION}, sort_keys=True)
         t0 = time.perf_counter()
         dest, n, reused = _stage_quarter(con, path, key, columns, stage_dir, csv_root)
         staged.append(dest)
@@ -153,8 +157,6 @@ def convert(ctx):
         log(f"[{i}/{len(manifest['zips'])}] {path.stem}: {n:,} rows "
             f"{'(staged earlier)' if reused else f'in {time.perf_counter() - t0:.0f}s'}")
 
-    part = out.with_name(f".{out.name}.part")
-    part.unlink(missing_ok=True)
     log(f"writing {rows:,} rows to {out}")
     con.sql(f"""COPY (SELECT * FROM read_parquet([{', '.join(q(p) for p in staged)}]))
                 TO {q(part)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 122880)""")
@@ -214,12 +216,27 @@ def _stage_quarter(con, path: Path, key: str, columns: dict[str, str], stage_dir
     return dest, n, False
 
 
+def quarter_days(stem: str) -> list[str]:
+    """Every day of the quarter a zip covers, as CSV names: data_Q1_2016 -> 2016-01-01.csv..."""
+    m = re.fullmatch(r"data_Q([1-4])_(\d{4})", stem)
+    if not m:
+        raise ValueError(f"not a quarterly zip name: {stem}")
+    n, y = int(m[1]), int(m[2])
+    day, end = date(y, 3 * n - 2, 1), date(y + n // 4, 3 * n % 12 + 1, 1)
+    names = []
+    while day < end:
+        names.append(f"{day.isoformat()}.csv")
+        day += timedelta(days=1)
+    return names
+
+
 def _extract_days(path: Path, csv_dir: Path) -> list[Path]:
     """Unzip the daily CSVs flat into csv_dir, sorted by name; skip macOS metadata.
 
     Most zips carry an AppleDouble copy of every CSV (__MACOSX/._2019-04-01.csv), which is
-    why the archives hold over 6,000 files for 3,652 days. Some zips nest the CSVs in a
-    folder, so only the file name is kept.
+    why the archives hold over 6,000 files for 3,653 days. Some zips nest the CSVs in a
+    folder, so only the file name is kept. Every day of the quarter must be there (a
+    header-only day is fine): a missing day would otherwise pass every row count.
     """
     days: dict[str, zipfile.ZipInfo] = {}
     with zipfile.ZipFile(path) as zf:
@@ -235,8 +252,12 @@ def _extract_days(path: Path, csv_dir: Path) -> list[Path]:
             if name in days:
                 raise ValueError(f"{path.name}: {name} appears twice")
             days[name] = info
-        if not days:
-            raise ValueError(f"{path.name}: no daily CSVs")
+        expected = quarter_days(path.stem)
+        if sorted(days) != expected:
+            gone = sorted(set(expected) - set(days))
+            extra = sorted(set(days) - set(expected))
+            raise ValueError(f"{path.name}: daily CSVs differ from the quarter's days; "
+                             f"missing {gone[:5]}, extra {extra[:5]}")
         for name in sorted(days):
             with zf.open(days[name]) as src, (csv_dir / name).open("wb") as dst:
                 shutil.copyfileobj(src, dst, _CHUNK)  # zipfile checks each file's CRC

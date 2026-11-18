@@ -33,7 +33,7 @@ once = true
 
 [[steps]]
 name = "panel_convert"
-description = "The zips' 3,652 daily CSVs to dataset/dataset.parquet, quarter by quarter"
+description = "The zips' 3,653 daily CSVs to dataset/dataset.parquet, quarter by quarter"
 function = "raw:convert"
 inputs = { zips = "/srv/downloads/backblaze-drive-stats/zips", schema = "config/panel-schema.toml" }
 outputs = { panel = "dataset/dataset.parquet" }

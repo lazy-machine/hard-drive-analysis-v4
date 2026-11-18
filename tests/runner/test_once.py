@@ -76,7 +76,7 @@ def test_wrong_sha256_stops_the_run_without_rebuilding(tmp_path):
     panel.write_text("someone else's panel")
     r, out = run(cfg, force=True)
     assert not r.ok and r.halted_by == "fetch"
-    assert "pin the new sha256, or delete the file to rebuild it" in out
+    assert "pin its sha256; delete it only if it is damaged" in out
     assert panel.read_text() == "someone else's panel"
     assert not (tmp_path / "raw").exists()
 

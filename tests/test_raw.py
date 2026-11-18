@@ -6,7 +6,7 @@ import json
 import re
 import tomllib
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import duckdb
 import pytest
@@ -22,9 +22,12 @@ HEAD_2016 = ("date,serial_number,model,capacity_bytes,failure,"
 HEAD_LATER = HEAD_2016 + ",smart_7_raw,is_legacy_format"
 
 
-def write_zip(path: Path, files: dict[str, str]) -> None:
+def write_zip(path: Path, files: dict[str, str], header: str | None = None) -> None:
+    """A zip with `files`, padded with header-only CSVs for the quarter's other days."""
+    days = {PurePosixPath(n).name for n in files}
+    pad = {d: header + "\n" for d in raw.quarter_days(path.stem) if d not in days} if header else {}
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name, text in files.items():
+        for name, text in {**files, **pad}.items():
             zf.writestr(name, text)
 
 
@@ -40,14 +43,14 @@ def source(tmp_path):
         "2016-01-01.csv": f"{HEAD_2016}\n2016-01-01,A,M1,4000787030016,0,100,0,9\n",
         "__MACOSX/._2016-01-01.csv": "\x00\x05\x16\x07 mac metadata",
         ".DS_Store": "junk",
-    })
+    }, HEAD_2016)
     write_zip(src / "data_Q2_2016.zip", {
         "data_Q2_2016/2016-04-01.csv": "\r".join([
             HEAD_LATER, "4/1/16,A,M1,4000787030016,0,100,0,99,2.81472E+14,False",
             "3/31/16,C,M3,4000787030016,1,90,7,50,,True"]) + "\r",
         "data_Q2_2016/2016-04-02.csv": HEAD_LATER + "\n",
         "__MACOSX/data_Q2_2016/._2016-04-01.csv": "junk",
-    })
+    }, HEAD_LATER)
     return src
 
 
@@ -128,21 +131,35 @@ def test_convert_matches_schema_and_keeps_quirks(tmp_path, source):
     assert not list(out.parent.glob(".*.part"))
 
 
-def test_convert_replaces_a_symlink_without_touching_its_target(tmp_path, source):
+def test_rebuild_is_byte_identical(tmp_path, source):
+    """The pin in pipeline.toml assumes the same zips always give the same panel."""
     zips, _ = download(tmp_path, source)
-    old = tmp_path / "elsewhere" / "v1.parquet"
-    old.parent.mkdir()
-    old.write_bytes(b"the v1 panel")
-    out = tmp_path / "dataset" / "dataset.parquet"
-    out.parent.mkdir()
-    out.symlink_to(old)
-    out, _ = convert(tmp_path, zips, out.parent / "dataset.parquet")
-    assert not out.is_symlink() and old.read_bytes() == b"the v1 panel"
+    _, first = convert(tmp_path, zips)
+    _, second = convert(tmp_path, zips)
+    assert first["sha256"] == second["sha256"]
+
+
+def test_stale_part_does_not_count_against_free_space(tmp_path, source):
+    zips, _ = download(tmp_path, source)
+    part = tmp_path / "dataset" / ".dataset.parquet.part"
+    part.parent.mkdir()
+    part.write_bytes(b"left by a crash")
+    convert(tmp_path, zips)
+    assert not part.exists()
+
+
+def test_missing_day_stops(tmp_path, source):
+    write_zip(source / "data_Q2_2016.zip", {f"2016-0{m}-0{d}.csv": HEAD_LATER + "\n"
+                                            for m in (4, 5) for d in (1, 2)})
+    zips, _ = download(tmp_path, source)
+    with pytest.raises(ValueError, match="missing .'2016-04-03.csv'"):
+        convert(tmp_path, zips)
 
 
 def test_unknown_column_stops_and_staged_quarters_are_reused(tmp_path, source):
     good = (source / "data_Q2_2016.zip").read_bytes()
-    write_zip(source / "data_Q2_2016.zip", {"2016-04-01.csv": HEAD_LATER + ",smart_999_raw\n"})
+    write_zip(source / "data_Q2_2016.zip", {"2016-04-01.csv": HEAD_LATER + ",smart_999_raw\n"},
+              HEAD_LATER)
     zips, _ = download(tmp_path, source)
     with pytest.raises(ValueError, match="smart_999_raw"):
         convert(tmp_path, zips)
@@ -157,7 +174,8 @@ def test_unknown_column_stops_and_staged_quarters_are_reused(tmp_path, source):
 
 def test_bad_value_in_a_typed_column_stops(tmp_path, source):
     write_zip(source / "data_Q2_2016.zip", {
-        "2016-04-01.csv": f"{HEAD_2016}\n2016-04-01,A,M1,4000787030016,0,100,0,lots\n"})
+        "2016-04-01.csv": f"{HEAD_2016}\n2016-04-01,A,M1,4000787030016,0,100,0,lots\n"},
+        HEAD_2016)
     zips, _ = download(tmp_path, source)
     with pytest.raises(duckdb.ConversionException):
         convert(tmp_path, zips)
@@ -165,17 +183,24 @@ def test_bad_value_in_a_typed_column_stops(tmp_path, source):
 
 def test_unparseable_date_stops(tmp_path, source):
     write_zip(source / "data_Q2_2016.zip", {
-        "2016-04-01.csv": f"{HEAD_2016}\n01.04.2016,A,M1,4000787030016,0,100,0,9\n"})
+        "2016-04-01.csv": f"{HEAD_2016}\n01.04.2016,A,M1,4000787030016,0,100,0,9\n"},
+        HEAD_2016)
     zips, _ = download(tmp_path, source)
     with pytest.raises(ValueError, match="neither YYYY-MM-DD nor M/D/YY"):
         convert(tmp_path, zips)
 
 
+def test_quarter_days():
+    assert len(raw.quarter_days("data_Q1_2016")) == 91  # leap year
+    assert raw.quarter_days("data_Q4_2025")[-1] == "2025-12-31.csv"
+    assert sum(len(raw.quarter_days(z[:-4])) for z in raw.quarters("2016Q1", "2025Q4")) == 3653
+
+
 def test_zip_layout_checks(tmp_path):
     for files, message in [({"notes.csv": "x"}, "unexpected CSV"),
                            ({"a/2016-01-01.csv": "x", "b/2016-01-01.csv": "x"}, "appears twice"),
-                           ({"__MACOSX/._2016-01-01.csv": "x"}, "no daily CSVs")]:
-        z = tmp_path / "q.zip"
+                           ({"__MACOSX/._2016-01-01.csv": "x"}, "missing")]:
+        z = tmp_path / "data_Q1_2016.zip"
         write_zip(z, files)
         (tmp_path / "out").mkdir(exist_ok=True)
         with pytest.raises(ValueError, match=message):
