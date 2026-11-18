@@ -80,6 +80,11 @@ def few_threads(monkeypatch):
     monkeypatch.setenv("HDA_THREADS", "2")
 
 
+def test_integral():
+    assert all(map(raw.integral, ["0", "-7", "12.00", "2.81472E+14", "10e-1", " 3 ", "1.50e1"]))
+    assert not any(map(raw.integral, ["1.5", "1e-3", "0x10", "1_000", "nan", "-inf", "", "a"]))
+
+
 def test_quarters():
     assert raw.quarters("2016Q3", "2017Q1") == ["data_Q3_2016.zip", "data_Q4_2016.zip",
                                                 "data_Q1_2017.zip"]
@@ -135,12 +140,14 @@ def test_convert_matches_schema_and_keeps_quirks(tmp_path, source):
     assert not list(out.parent.glob(".*.part"))
 
 
-def test_rebuild_is_byte_identical(tmp_path, source):
-    """The pin in pipeline.toml assumes the same zips always give the same panel."""
+def test_rebuild_gives_the_same_rows_in_the_same_order(tmp_path, source):
+    """Bytes may differ between runs (row-group layout); rows and their order may not."""
     zips, _ = download(tmp_path, source)
-    _, first = convert(tmp_path, zips)
-    _, second = convert(tmp_path, zips)
-    assert first["sha256"] == second["sha256"]
+    rows = []
+    for _ in range(2):
+        out, _ = convert(tmp_path, zips)
+        rows.append(duckdb.connect().execute(f"SELECT * FROM read_parquet('{out}')").fetchall())
+    assert rows[0] == rows[1] and len(rows[0]) == 5
 
 
 def test_stale_part_does_not_count_against_free_space(tmp_path, source, monkeypatch):
@@ -197,7 +204,8 @@ def test_bad_value_in_a_typed_column_stops(tmp_path, source):
         convert(tmp_path, zips)
 
 
-@pytest.mark.parametrize("value", ["1.5", "1.0000000000000001", "1.5E+0", "1e-3", "0x10"])
+@pytest.mark.parametrize("value", ["1.5", "1.0000000000000001", "1.5E+0", "1e-3", "0x10",
+                                   "1_000", "nan", "inf", "12abc"])
 def test_fraction_in_an_integer_column_stops(tmp_path, source, value):
     write_zip(source / "data_Q2_2016.zip", {
         "2016-04-01.csv": f"{HEAD_2016}\n2016-04-01,A,M1,4000787030016,0,100,0,{value}\n"},
@@ -208,15 +216,17 @@ def test_fraction_in_an_integer_column_stops(tmp_path, source, value):
 
 
 def test_integral_text_in_an_integer_column_converts(tmp_path, source):
-    values = ["12", "-3", "+4", "12.00", " 7 ", "2.81472E+14", "1.5e1"]
+    values = ["12", "-3", "+4", "12.00", " 7 ", "2.81472E+14", "1.5e1", "1.50e1", "10e-1",
+              "1.0e0", "0e5", "-0.0"]
     rows = "".join(f"2016-04-01,S{i},M1,4000787030016,0,100,0,{v}\n"
                    for i, v in enumerate(values))
     write_zip(source / "data_Q2_2016.zip", {"2016-04-01.csv": HEAD_2016 + "\n" + rows}, HEAD_2016)
     zips, _ = download(tmp_path, source)
     out, _ = convert(tmp_path, zips)
     got = duckdb.connect().execute(f"SELECT smart_9_raw FROM read_parquet('{out}') "
-                                   "WHERE date = '2016-04-01'").fetchall()
-    assert [r[0] for r in got] == [12, -3, 4, 12, 7, 281472000000000, 15]
+                                   "WHERE date = '2016-04-01' ORDER BY serial_number").fetchall()
+    # serials sort as S0, S1, S10, S11, S2, ...
+    assert [r[0] for r in got] == [12, -3, 0, 0, 4, 12, 7, 281472000000000, 15, 15, 1, 1]
 
 
 def test_unparseable_date_stops(tmp_path, source):

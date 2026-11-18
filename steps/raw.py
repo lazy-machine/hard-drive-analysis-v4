@@ -29,22 +29,29 @@ import tomllib
 import urllib.request
 import zipfile
 from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 
 from common import Progress, connect, q, scalar
 
 # Bump when the conversion changes, so per-quarter files staged by older code are redone.
-CONVERTER_VERSION = 2
+CONVERTER_VERSION = 3
 _DAY_CSV = re.compile(r"^\d{4}-\d{2}-\d{2}\.csv$")
 _QUARTER = re.compile(r"^(\d{4})Q([1-4])$")
 _CHUNK = 8 * 2**20
-# Whether text is an integer, judged on the digits (a DOUBLE turns 1.0000000000000001 into 1):
-# 12, 12.00, or scientific notation with no more decimals than its exponent (2.81472E+14).
-_INTEGRAL_SQL = (
-    "(regexp_full_match({x}, '[+-]?[0-9]+(\\.0*)?') OR "
-    "(regexp_full_match({x}, '[+-]?[0-9]+(\\.[0-9]*)?[eE]\\+?[0-9]+') AND "
-    "length(regexp_extract({x}, '\\.([0-9]*)', 1)) <= "
-    "CAST(regexp_extract({x}, '[eE]\\+?([0-9]+)', 1) AS INTEGER)))")
+
+
+def integral(text: str) -> bool:
+    """Whether CSV text is a whole number, judged exactly (a DOUBLE turns 1.0000000000000001
+    into 1): 12, 12.00, 2.81472E+14 and 10e-1 are; 1.5, 1e-3 and 0x10 are not."""
+    text = text.strip()
+    if "_" in text:  # Decimal reads 1_000; DuckDB's cast would not
+        return False
+    try:
+        d = Decimal(text)
+    except InvalidOperation:
+        return False
+    return d.is_finite() and d == d.to_integral_value()
 
 
 def quarters(first: str, last: str) -> list[str]:
@@ -149,6 +156,7 @@ def convert(ctx):
     manifest = json.loads((zips / "manifest.json").read_text())
     # the spill folder is on the HDD: DuckDB asks for tens of GB of it, which the SSD can't spare
     con = connect(ctx.workdir, ctx.name, tmp=spill, ordered=True)
+    con.create_function("hda_integral", integral, ["VARCHAR"], "BOOLEAN")
     schema_sha = hashlib.sha256(schema_bytes).hexdigest()
     staged, rows = [], 0
     for i, entry in enumerate(manifest["zips"], 1):
@@ -168,10 +176,9 @@ def convert(ctx):
             f"{'(staged earlier)' if reused else f'in {time.perf_counter() - t0:.0f}s'}")
 
     log(f"writing {rows:,} rows to {out}")
-    # One thread: parallel writers cut row groups by timing, so the same zips gave panels with
-    # the same rows but different bytes, and the sha256 pin could never be reproduced. On
-    # real data this costs ~100 s per 40M rows (~30 min for the panel), against hours of IO.
-    con.execute("SET threads = 1")
+    # Same zips, same rows in the same order; the bytes still vary, because DuckDB's parallel
+    # writers cut row groups by timing (a one-thread final write is not enough: the staged
+    # quarters' layout carries through). So every rebuild needs a new sha256 pin.
     con.sql(f"""COPY (SELECT * FROM read_parquet([{', '.join(q(p) for p in staged)}]))
                 TO {q(part)} (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 122880)""")
     _check_panel(con, part, columns, rows)
@@ -217,8 +224,9 @@ def _stage_quarter(con, path: Path, key: str, columns: dict[str, str], stage_dir
             return f'"{name}"'
         col = f'"{name}"'
         if typ == "BIGINT":  # CAST rounds '1.5' to 2; a counter with a fraction stops the run
-            return (f"CASE WHEN {col} IS NULL OR {_INTEGRAL_SQL.format(x=f'trim({col})')} "
-                    f"THEN CAST({col} AS BIGINT) ELSE "
+            # plain digits take the fast path; only the rare other forms reach Python
+            return (f"CASE WHEN {col} IS NULL OR regexp_full_match(trim({col}), '[+-]?[0-9]+') "
+                    f"OR hda_integral({col}) THEN CAST({col} AS BIGINT) ELSE "
                     f"error('{path.name}: {name} = ' || {col} || ' is not an integer') END "
                     f"AS {col}")
         return f'CAST({col} AS {typ}) AS {col}'  # strict: a bad value stops the run
