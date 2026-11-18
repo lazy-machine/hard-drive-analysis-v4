@@ -155,6 +155,11 @@ def test_stale_part_does_not_count_against_free_space(tmp_path, source, monkeypa
     assert len(checked) == 2 and not part.exists()
 
 
+def test_too_little_free_space_stops(tmp_path):
+    with pytest.raises(OSError, match="panel_convert needs"):
+        raw._require_free(tmp_path, 10**9)
+
+
 def test_missing_day_stops(tmp_path, source):
     write_zip(source / "data_Q2_2016.zip", {f"2016-0{m}-0{d}.csv": HEAD_LATER + "\n"
                                             for m in (4, 5) for d in (1, 2)})
