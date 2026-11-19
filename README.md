@@ -22,8 +22,9 @@ perfect.
 
 - SMART carries real failure signal, strongest close to the failure.
 - Failures are rare (about 0.1% of drive-days fail within 30 days), so most alerts are still
-  false alarms: with the alert threshold set to flag 1% of healthy drive-days, 3.8% of the
-  flagged drive-days fail within 30 days.
+  false alarms. With the alert threshold set on validation drives to flag 1% of healthy
+  drive-days, 3.8% of the flagged test drive-days with a known 30-day outcome end in a
+  failure.
 - The model seldom names a failure day months ahead.
 
 A run writes the full numbers to `build/report/results.md` and the explanation to
@@ -97,11 +98,11 @@ tail -F build/logs/panel_download.log build/logs/panel_convert.log
 `pipeline.toml` holds the sha256 of the panel in two places, and the pipeline refuses a
 panel that does not match. Your panel has the same rows as ours but different bytes (see
 [Raw data](#raw-data)), so its sha256 differs. Once step 3 has ended with `✓ completed`,
-this hashes your panel (about a minute) and writes the result into both places. It changes
-nothing if the panel is missing:
+this hashes your panel (about a minute) and writes the result into both places. If the
+panel is missing it prints an error and changes nothing:
 
 ```bash
-sha=$(sha256sum dataset/dataset.parquet | cut -d' ' -f1) && [ ${#sha} -eq 64 ] && sed -i -E "s/sha256 = \"[0-9a-f]{64}\"/sha256 = \"$sha\"/" pipeline.toml
+sha=$(sha256sum dataset/dataset.parquet | cut -d' ' -f1) && [[ $sha =~ ^[0-9a-f]{64}$ ]] && sed -i -E "s/sha256 = \"[0-9a-f]{64}\"/sha256 = \"$sha\"/" pipeline.toml
 ```
 
 `git diff pipeline.toml` should now show the same new sha256 on two lines.
@@ -137,7 +138,7 @@ committed as `small`; use `full` for real results.
 Two environment variables tune resources without causing any step to rerun:
 `HDA_MEMORY_FRACTION` (share of the machine's memory DuckDB may use, default 0.6) and
 `HDA_THREADS` (threads for DuckDB and LightGBM, worker processes for the bootstrap; default:
-one per core, and for LightGBM whatever OpenMP picks).
+one per logical CPU, and for LightGBM whatever OpenMP picks).
 
 ## Commands
 
@@ -154,7 +155,7 @@ one per core, and for LightGBM whatever OpenMP picks).
 | `uv run ruff check src steps tests` | Lint |
 
 No flag reruns the two panel build steps while the panel exists and matches its pin, and
-any run that includes them builds a missing panel. See [Raw data](#raw-data).
+any real run (not `-n`) that includes them builds a missing panel. See [Raw data](#raw-data).
 
 ## Pipeline
 
