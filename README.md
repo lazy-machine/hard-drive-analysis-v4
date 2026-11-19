@@ -22,7 +22,8 @@ perfect.
 
 - SMART carries real failure signal, strongest close to the failure.
 - Failures are rare (about 0.1% of drive-days fail within 30 days), so most alerts are still
-  false alarms.
+  false alarms: with the alert threshold set to flag 1% of healthy drive-days, 3.8% of the
+  flagged drive-days fail within 30 days.
 - The model seldom names a failure day months ahead.
 
 A run writes the full numbers to `build/report/results.md` and the explanation to
@@ -33,9 +34,10 @@ A run writes the full numbers to `build/report/results.md` and the explanation t
 | | |
 |---|---|
 | OS | Linux (developed and tested there; CI runs Ubuntu) |
-| Tools | `git` and [uv](https://docs.astral.sh/uv/getting-started/installation/). uv installs Python 3.13+ and every dependency |
-| Memory | 16 GB for `small` and `medium`, 32 GB for `full` |
-| Disk | About 90 GiB to build the panel (29 GiB of zips kept, 60 GiB free for scratch), 30 GiB for the panel, 2 GiB for `build/` |
+| Tools | `git` and [uv](https://docs.astral.sh/uv/getting-started/installation/). uv installs Python 3.13+ and every Python dependency |
+| System library | GNU OpenMP (`libgomp.so.1`), which LightGBM loads. Most desktops have it; on a minimal Debian or Ubuntu: `sudo apt install libgomp1` |
+| Memory | 16 GB for `small` and `medium`, a 32 GB machine for `full` |
+| Disk | About 90 GiB to build the panel (28 GiB of zips kept, 60 GiB free for scratch), 30 GiB for the panel, 2 GiB for `build/` |
 | Time | About 3 hours to build the panel once, then 15 minutes (`small`) to under 2 hours (`full`) per run |
 
 Times in this file were measured on a 16-thread machine with 31 GB of memory, an SSD for the
@@ -66,11 +68,15 @@ Create that folder, if `/srv/downloads` is (or can be) on a disk with 90 GiB fre
 sudo mkdir -p /srv/downloads/backblaze-drive-stats && sudo chown "$USER" /srv/downloads/backblaze-drive-stats
 ```
 
-Or point the steps at a folder of your own. Replace `/mnt/big` with it:
+Or point the steps at a folder of your own, one you can write to. Replace `/mnt/big` with
+it:
 
 ```bash
 sed -i 's#/srv/downloads#/mnt/big#g' pipeline.toml
 ```
+
+After this change one test, `test_pipeline_pins_agree`, fails: it checks that the paths
+still start with `/srv/downloads/`. That is expected on your machine.
 
 ### 3. Build the panel
 
@@ -80,19 +86,25 @@ uv run data-pipeline --only panel_download panel_convert
 
 This downloads Backblaze's 40 quarterly zips (about 40 minutes here) and converts their
 3,653 daily CSVs to `dataset/dataset.parquet` (about 2 hours here). It can be interrupted:
-finished zips and converted quarters are reused. Follow it with
-`tail -f build/logs/panel_convert.log`.
+finished zips and converted quarters are reused. Follow it from a second terminal:
+
+```bash
+tail -F build/logs/panel_download.log build/logs/panel_convert.log
+```
 
 ### 4. Pin your panel's sha256
 
 `pipeline.toml` holds the sha256 of the panel in two places, and the pipeline refuses a
 panel that does not match. Your panel has the same rows as ours but different bytes (see
-[Raw data](#raw-data)), so its sha256 differs. This writes the one `panel_convert` printed
-into both places:
+[Raw data](#raw-data)), so its sha256 differs. Once step 3 has ended with `✓ completed`,
+this hashes your panel (about a minute) and writes the result into both places. It changes
+nothing if the panel is missing:
 
 ```bash
-sed -i -E "s/sha256 = \"[0-9a-f]{64}\"/sha256 = \"$(grep -oE 'sha256 [0-9a-f]{64}' build/logs/panel_convert.log | tail -1 | cut -d' ' -f2)\"/" pipeline.toml
+sha=$(sha256sum dataset/dataset.parquet | cut -d' ' -f1) && [ ${#sha} -eq 64 ] && sed -i -E "s/sha256 = \"[0-9a-f]{64}\"/sha256 = \"$sha\"/" pipeline.toml
 ```
+
+`git diff pipeline.toml` should now show the same new sha256 on two lines.
 
 ### 5. Run
 
@@ -124,7 +136,8 @@ committed as `small`; use `full` for real results.
 
 Two environment variables tune resources without causing any step to rerun:
 `HDA_MEMORY_FRACTION` (share of the machine's memory DuckDB may use, default 0.6) and
-`HDA_THREADS` (threads for DuckDB, LightGBM and the bootstrap; default: all).
+`HDA_THREADS` (threads for DuckDB and LightGBM, worker processes for the bootstrap; default:
+one per core, and for LightGBM whatever OpenMP picks).
 
 ## Commands
 
@@ -134,11 +147,14 @@ Two environment variables tune resources without causing any step to rerun:
 | `uv run data-pipeline` | Run everything that is out of date |
 | `uv run data-pipeline -F` | The same, printing each step's output live |
 | `uv run data-pipeline -r STEP` | Run `STEP` again even if nothing changed |
-| `uv run data-pipeline -o STEP` | Run only `STEP` (its inputs must exist) |
-| `uv run data-pipeline -f` | Run every step again, except the panel build |
+| `uv run data-pipeline -o STEP` | Look at `STEP` only: it runs if it is out of date (its inputs must exist) |
+| `uv run data-pipeline -f` | Run every step again even if nothing changed |
 | `uv run data-verify checks` | List every check of the data gate |
 | `uv run pytest -q` | All tests |
 | `uv run ruff check src steps tests` | Lint |
+
+No flag reruns the two panel build steps while the panel exists and matches its pin, and
+any run that includes them builds a missing panel. See [Raw data](#raw-data).
 
 ## Pipeline
 
