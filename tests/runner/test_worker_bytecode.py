@@ -85,3 +85,19 @@ def test_project_venv_under_root_keeps_bytecode_cache(tmp_path):
     assert not worker.is_step_code_dir(str(site / "numpy"), roots, installed)
     assert not worker.is_step_code_dir(str(tmp_path / "steps" / "x.zip"), roots, installed)
     assert Path(sysconfig.get_path("purelib")).resolve() in worker._installed_dirs()
+
+
+def test_explicit_root_inside_installed_dir_is_step_code(tmp_path):
+    site = tmp_path / "site-packages"
+    root = site / "steps"
+    (root / "pkg").mkdir(parents=True)
+    for roots in ({root}, {site}):
+        assert worker.is_step_code_dir(str(root / "pkg"), roots, {site})
+
+
+def test_symlink_then_dotdot_is_matched_after_resolving(tmp_path):
+    (tmp_path / "steps" / "a").mkdir(parents=True)
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "link").symlink_to(tmp_path / "steps" / "a", target_is_directory=True)
+    entry = str(tmp_path / "other" / "link" / "..")
+    assert worker.is_step_code_dir(entry, {tmp_path / "steps"}, set())

@@ -67,8 +67,7 @@ class _SourceLoader(machinery.SourceFileLoader):
 
 def _forms(path: str) -> set[Path]:
     """A path as given and with symlinks resolved: either may be the one under a root."""
-    given = Path(os.path.abspath(path))
-    return {given, given.resolve()}
+    return {Path(os.path.abspath(path)), Path(path).resolve()}
 
 
 def _installed_dirs() -> set[Path]:
@@ -79,15 +78,13 @@ def _installed_dirs() -> set[Path]:
 
 
 def is_step_code_dir(entry: str, roots: set[Path], installed: set[Path]) -> bool:
-    """Under a ``python_path`` root and not an installed-packages directory (a project
-    ``.venv`` sits under the default root ``.``)."""
+    """Under a ``python_path`` root, unless also under an installed-packages directory
+    that lies inside that root (a project ``.venv`` under the default root ``.``)."""
     if not os.path.isdir(entry):
         return False
-    for path in _forms(entry):
-        if any(path.is_relative_to(r) for r in roots) and \
-                not any(path.is_relative_to(d) for d in installed):
-            return True
-    return False
+    return any(path.is_relative_to(r) and not any(
+                   path.is_relative_to(d) and d != r and d.is_relative_to(r) for d in installed)
+               for path in _forms(entry) for r in roots)
 
 
 def _compile_from_source(python_path: list[str]) -> None:

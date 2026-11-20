@@ -37,19 +37,23 @@ def top_level_imports(path: Path) -> set[str]:
     return names
 
 
-def module_name(path: Path) -> str:
-    root = next(r for r in PIPELINE.python_path if path.is_relative_to(r))
-    return ".".join(path.relative_to(root).with_suffix("").parts).removesuffix(".__init__")
+def module_name(path: Path) -> str | None:
+    for root in PIPELINE.python_path:
+        if path.is_relative_to(root):
+            return ".".join(path.relative_to(root).with_suffix("").parts).removesuffix(".__init__")
+    return None
 
 
 def needed(step: config.Step) -> set[str]:
     """Distributions imported anywhere in the code the runner hashes for ``step``."""
-    roots = {step.module: checkpoint.module_file(PIPELINE, step.module)}
+    files = {checkpoint.module_file(PIPELINE, step.module)}
+    modules = [step.module]
     for rel in step.watch:  # watched modules may be imported dynamically
         if (path := PIPELINE.resolve(rel)).suffix == ".py":
-            roots[module_name(path)] = path
-    files = set(roots.values())
-    for module in roots:
+            files.add(path)
+            if module := module_name(path):
+                modules.append(module)
+    for module in modules:
         files.update(checkpoint.local_imports(PIPELINE, module))
     names = set().union(*(top_level_imports(f) for f in files))
     dists = set()
