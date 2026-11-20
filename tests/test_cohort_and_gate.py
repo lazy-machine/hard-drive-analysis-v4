@@ -223,3 +223,76 @@ def test_gate_catches_cohort_drive_in_wrong_split(pipeline_run, tmp_path):
                           ELSE split END AS split)
         FROM cohort""")
     assert "custom.cohort_split_matches_stable_bucket" in blocking
+
+
+def _dense_rows(project):
+    """Snapshot rows at the dense weight, with whether they fall on the drive's stride day."""
+    build = project / "build"
+    stride = load_sample(project / "config" / "sample.toml")["stride_days"]
+    rows = duckdb.sql(f"""SELECT s.serial_number, s.date
+                          FROM read_parquet('{build}/snapshots.parquet') s
+                          JOIN read_parquet('{build}/cohort.parquet') c USING (serial_number)
+                          WHERE abs(s.weight - c.drive_weight) < 1e-6
+                          ORDER BY s.serial_number, s.date""").df()
+    days = (pd.to_datetime(rows["date"]) - pd.Timestamp("2000-01-01")).dt.days
+    off = rows["serial_number"].map(lambda s: int(stable_unit(s, "stride") * stride))
+    return rows.assign(on_stride=(days + off) % stride == 0), stride
+
+
+def test_gate_catches_stride_weight_in_dense_window(pipeline_run, tmp_path):
+    """A dense-window row on a stride day weighted as a stride row: a valid weight, wrong place."""
+    project, _ = pipeline_run
+    rows, stride = _dense_rows(project)
+    serial, day = rows.loc[rows["on_stride"], ["serial_number", "date"]].iloc[0]
+    failed = _gate(project, tmp_path, f"""UPDATE snap SET weight = weight * {stride}
+                               WHERE serial_number = '{serial}' AND date = DATE '{day:%Y-%m-%d}'""")
+    assert "assert.dense_window_complete" in failed
+    assert not failed & {"assert.snapshot_weights_valid", "custom.stride_rows_on_stride_days",
+                         "assert.dense_rows_before_visible_failure"}
+
+
+def test_gate_catches_deleted_dense_rows(pipeline_run, tmp_path):
+    project, _ = pipeline_run
+    rows, _ = _dense_rows(project)
+    serial = rows["serial_number"].iloc[0]
+    failed = _gate(project, tmp_path, f"""DELETE FROM snap USING cohort c
+                               WHERE snap.serial_number = c.serial_number
+                                 AND snap.serial_number = '{serial}'
+                                 AND abs(snap.weight - c.drive_weight) < 1e-6""")
+    assert "assert.dense_window_complete" in failed
+
+
+def test_gate_catches_null_cohort_weight(pipeline_run, tmp_path):
+    project, _ = pipeline_run
+    blocking = _gate_on(project, tmp_path, cohort_sql="""
+        SELECT * REPLACE (CASE WHEN serial_number = (SELECT min(serial_number) FROM cohort)
+                          THEN NULL ELSE drive_weight END AS drive_weight)
+        FROM cohort""")
+    assert "assert.cohort_weights_match_sampling" in blocking
+
+
+FIRST_FAILING = "SELECT min(serial_number) FROM cohort WHERE failure_date IS NOT NULL"
+
+
+def test_gate_catches_wrong_stratum(pipeline_run, tmp_path):
+    """A failing drive sampled as healthy, its weight consistent with the wrong stratum."""
+    project, _ = pipeline_run
+    healthy = load_sample(project / "config" / "sample.toml")["healthy_fraction"]
+    blocking = _gate_on(project, tmp_path, cohort_sql=f"""
+        SELECT * REPLACE (
+            CASE WHEN serial_number = ({FIRST_FAILING}) THEN 'healthy' ELSE stratum END AS stratum,
+            CASE WHEN serial_number = ({FIRST_FAILING}) THEN 1 / {healthy} ELSE drive_weight END
+                AS drive_weight)
+        FROM cohort""")
+    assert "custom.cohort_stratum_matches_rule" in blocking
+    assert "assert.cohort_weights_match_sampling" not in blocking
+
+
+@pytest.mark.parametrize("column", ["first_date", "last_date", "failure_date"])
+def test_gate_catches_cohort_dates_off_drive_index(pipeline_run, tmp_path, column):
+    project, _ = pipeline_run
+    blocking = _gate_on(project, tmp_path, cohort_sql=f"""
+        SELECT * REPLACE (CASE WHEN serial_number = ({FIRST_FAILING}) THEN {column} + 1
+                          ELSE {column} END AS {column})
+        FROM cohort""")
+    assert "assert.cohort_dates_match_drives" in blocking
