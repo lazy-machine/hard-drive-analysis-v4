@@ -73,7 +73,8 @@ def test_failure_after_train_end_does_not_pick_train_drives():
         rows = [(s, "ST4000DM000", "2020-01-01", "2025-12-31", failure, 4e12) for s in serials]
         return select_cohort(drives_frame(rows), STUDY, scale)[0].set_index("serial_number")
 
-    healthy, late, early = (cohort_with(f) for f in (None, "2024-06-01", "2023-06-01"))
+    train_end = STUDY["split"]["train_end"]
+    healthy, late, early = (cohort_with(f) for f in (None, "2024-06-01", train_end))
     trainval = lambda c: c[c["split"] != "test"]  # noqa: E731
     n_trainval = sum(stable_bucket(s) < 80 for s in serials)
     assert 0.07 * n_trainval < len(trainval(healthy)) < 0.13 * n_trainval
@@ -235,7 +236,8 @@ def _gate_on(project, tmp_path, snapshots_sql=None, cohort_sql=None):
 def test_gate_catches_cohort_weight_from_failure_after_train_end(pipeline_run, tmp_path):
     """A train/val drive weighted as failing for a failure after train_end."""
     project, _ = pipeline_run
-    late = """split <> 'test' AND failure_date > DATE '2023-12-31'"""
+    train_end = load_study(project / "config" / "study.toml")["split"]["train_end"]
+    late = f"split <> 'test' AND failure_date > DATE '{train_end}'"
     con = duckdb.connect()
     cohort = f"read_parquet('{project}/build/cohort.parquet')"
     strata = con.sql(f"SELECT DISTINCT stratum FROM {cohort} WHERE {late}").fetchall()
