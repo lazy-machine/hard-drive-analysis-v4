@@ -133,13 +133,14 @@ The console prints one line per finished step, so it can stay quiet for many min
 see more:
 
 - `uv run data-pipeline -F` prints each step's output live.
-- From a second terminal, `tail -F build/logs/<step>.log` follows a long step's progress
-  lines.
+- From a second terminal, `tail -F build/logs/extract.log` follows a long step's progress
+  lines (one file per step).
 - `build/.pipeline/logs/<step>.log` holds each step's full output, from its last run.
 
 Ctrl-C stops a run, and so does closing the terminal. Each step is checkpointed as soon as
-it finishes, so the next `uv run data-pipeline` starts at the interrupted step. To keep a
-run going after logout, start it with `nohup uv run data-pipeline > run.log 2>&1 &`.
+it finishes, so the next `uv run data-pipeline` keeps the finished steps cached and starts
+again at the interrupted one. To keep a run going after logout, start it with
+`nohup uv run data-pipeline > run.log 2>&1 &`.
 
 ## Scales
 
@@ -159,7 +160,7 @@ committed as `small`; use `full` for real results.
   estimates the same numbers. Smaller scales give wider intervals.
 - The `full` figures come from the 2026-11-18 run on the machine above; `small` and
   `medium` are older. The comments in `config/sample.toml` record earlier runs on older
-  code and are out of date: trust this table.
+  code and are out of date.
 - A later run reruns only the steps whose code, params or inputs changed, and those after
   them. With nothing changed it runs no step.
 
@@ -216,7 +217,8 @@ skips it when its code, params and inputs are unchanged.
 ## The panel
 
 `dataset/dataset.parquet` is Backblaze's drive-stats data for 2016 Q1 to 2025 Q4 (3,653
-days) in one parquet file: 646,777,037 rows, one per drive per day, 478,464 drives.
+daily CSVs) in one parquet file: 646,777,037 rows, the CSVs' rows as they are (about one
+per drive per day, duplicates included), 478,464 drives.
 `config/panel-schema.toml` lists its 198 columns in order with their types: `date`,
 `serial_number`, `model`, `capacity_bytes`, `failure`, the SMART attributes as
 `smart_<N>_normalized` and `smart_<N>_raw`, a few datacenter columns, and `filename` (the
@@ -233,15 +235,16 @@ To use a panel you already have, link it into place and check it (replace
 mkdir -p dataset && ln -s /path/to/dataset.parquet dataset/dataset.parquet && uv run data-pipeline -n
 ```
 
-The dry run hashes the file (about a minute). A matching panel shows `panel_download` and
-`panel_convert` as `kept`. A different one makes them `failed`, with "does not match its
-sha256". `sha256sum dataset/dataset.parquet` prints the hash on its own. If it does not
-match:
+The dry run checks the file's hash (about a minute the first time). A matching panel shows
+`panel_download` and `panel_convert` as `kept`. A different one shows `panel_download` as
+`FAILED`, with "does not match its sha256", and the dry run stops there.
+`sha256sum dataset/dataset.parquet` prints the hash on its own. If it does not match:
 
 - You built it with `panel_convert`: expected, the bytes differ between builds (see
   [Raw data](#raw-data)). Pin it as in Setup step 4.
 - It came from anywhere else: it is not the panel this pipeline expects, and the sha256 is
-  the only check. Do not pin it. Remove the link and build the panel (Setup steps 2 to 4).
+  the only check. Do not pin it. Move the file or link out of `dataset/` and build the
+  panel (Setup steps 2 to 4).
 
 ## Raw data
 
