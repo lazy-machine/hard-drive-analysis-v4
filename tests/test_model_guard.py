@@ -89,3 +89,11 @@ def test_stored_params_ignore_threads_and_memory_fallback(monkeypatch):
     assert stored["force_row_wise"] and "force_col_wise" not in stored
     assert fallback["force_col_wise"] and "force_row_wise" not in fallback
     assert (train["num_threads"], fallback["num_threads"]) == (2, 16)
+
+
+def test_lgbm_settings_win_over_histogram_and_threads_stay_unstored(monkeypatch):
+    monkeypatch.setenv("HDA_THREADS", "4")
+    p = {"lgbm": {"force_row_wise": False, "num_threads": 8}, "seed": 1}
+    train, stored = model._params(p, "row", "row")
+    assert train["force_row_wise"] is False and stored["force_row_wise"] is False
+    assert train["num_threads"] == 4 and "num_threads" not in stored

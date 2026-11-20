@@ -268,16 +268,16 @@ def _drift_sentence(row, label) -> str:
 
 
 def report(ctx):
-    out = ctx.outputs["dir"]
-    out.mkdir(parents=True, exist_ok=True)
-    for old in out.iterdir():
-        old.unlink()
     metrics = json.loads(ctx.inputs["metrics"].read_text())
     ref = metrics["reference"]
     if f"meta_{ref}" not in ctx.inputs:
         raise ValueError(
             f"the reference model is '{ref}' but report has no input meta_{ref}: add "
             f'meta_{ref} = "build/models/{ref}.json" to its inputs in pipeline.toml')
+    out = ctx.outputs["dir"]
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.iterdir():
+        old.unlink()
     cohort = json.loads(ctx.inputs["cohort_summary"].read_text())
     gate = json.loads(ctx.inputs["verify"].read_text())
     signal = pd.read_csv(ctx.inputs["explore"] / "feature_signal.csv")

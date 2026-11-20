@@ -232,9 +232,11 @@ def _params(p: dict, requested: str, used: str) -> tuple[dict, dict]:
     The thread count and the memory fallback depend on the machine, so the stored ones
     leave out the threads and keep the requested histogram mode: same inputs, same file.
     """
-    fixed = {**BASE_PARAMS, **p["lgbm"], "seed": p["seed"]}
-    train = {**fixed, **HISTOGRAM[used], "num_threads": int(os.environ.get("HDA_THREADS", 0))}
-    return train, {**fixed, **HISTOGRAM[requested]}
+    def merged(histogram: str) -> dict:
+        return {**BASE_PARAMS, **HISTOGRAM[histogram], **p["lgbm"], "seed": p["seed"]}
+
+    stored = {k: v for k, v in merged(requested).items() if k != "num_threads"}
+    return {**merged(used), "num_threads": int(os.environ.get("HDA_THREADS", 0))}, stored
 
 
 def _subset(meta, X, keep):

@@ -138,5 +138,8 @@ def test_report_names_the_missing_reference_meta(tmp_path):
     ctx = SimpleNamespace(
         inputs={"metrics": metrics, "meta_hazard_smart": tmp_path / "hazard_smart.json"},
         outputs={"dir": tmp_path / "report"}, params={})
+    (tmp_path / "report").mkdir()
+    (tmp_path / "report" / "results.md").write_text("previous run\n")
     with pytest.raises(ValueError, match='meta_hazard_nosmart = "build/models/hazard_nosmart'):
         report(ctx)
+    assert (tmp_path / "report" / "results.md").exists()
