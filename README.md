@@ -134,7 +134,7 @@ see more:
 
 - `uv run data-pipeline -F` prints each step's output live.
 - From a second terminal, `tail -F build/logs/extract.log` follows a long step's progress
-  lines (one file per step).
+  lines (long steps only).
 - `build/.pipeline/logs/<step>.log` holds each step's full output, from its last run.
 
 Ctrl-C stops a run, and so does closing the terminal. Each step is checkpointed as soon as
