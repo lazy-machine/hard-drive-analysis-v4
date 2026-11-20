@@ -286,11 +286,12 @@ class Orchestrator:
         selected = {s.name for s in steps}
         flagged: set[str] = set()
         for idx, step in enumerate(steps, 1):
+            gate = None
             if only:
-                self._warn_outside(step, selected, flagged, result, dry_run)
+                gate = self._left_out(step, selected, flagged, issues, result, dry_run)
             self.report.begin(idx, len(steps), step)
             outcome = self._step(step, issues.get(step.name, []), result,
-                                 force or step.name in forced, dry_run)
+                                 force or step.name in forced, dry_run, gate)
             self.running_log = None
             result.outcomes[step.name] = outcome
             self.report.end(idx, len(steps), step, outcome)
@@ -330,12 +331,15 @@ class Orchestrator:
             verdict = ("kept", "fixed files are healthy; once steps never rerun")
         return dict.fromkeys(once, verdict)
 
-    def _warn_outside(self, step: Step, selected: set[str], flagged: set[str],
-                      result: RunResult, dry_run: bool) -> None:
-        """Say when ``--only`` leaves out an upstream step, such as a gate, that isn't current.
+    def _left_out(self, step: Step, selected: set[str], flagged: set[str],
+                  issues: dict[str, list[str]], result: RunResult, dry_run: bool) -> str | None:
+        """Check the upstream steps ``--only`` leaves out. Returns why ``step`` must not run.
 
-        Checked before each step, not once at the start: a selected step that just ran can
-        be what made the step left out go stale.
+        A left-out step reached through ``depends_on``, such as the gate, must have a valid
+        checkpoint and pass preflight: its failure in an earlier run must still block. Any
+        other left-out step that isn't current only gets a warning, as does a gate a dry run
+        cannot judge yet. Checked before each step, not once at the start: a selected step
+        that just ran can be what made the step left out go stale.
         """
         p = self.pipeline
         ancestors: set[str] = set()
@@ -344,26 +348,47 @@ class Orchestrator:
             new = [u for u in p.upstream[queue.pop()] if u not in ancestors]
             ancestors.update(new)
             queue += new
+        gates = {d for n in ancestors | {step.name} for d in p.step(n).depends_on}
+        blockers = []
         for other in p.steps:
-            if other.name not in ancestors or other.name in selected | flagged:
+            if other.name not in ancestors or other.name in selected:
                 continue
             if other.once:
                 continue  # not stale in this sense: the fixed files decide when they run
+            gate = other.name in gates
+            if not gate and other.name in flagged:
+                continue
             fp = checkpoint.fingerprint(p, other, self.state)
             reason = checkpoint.stale_reason(p, other, self.state, fp)
+            if gate and not reason and issues.get(other.name):
+                reason = "preflight failed: " + "; ".join(issues[other.name])
+            if gate and reason:
+                blockers.append(f"'{other.name}', which is not up to date ({reason})")
+                continue
+            if other.name in flagged:
+                continue
             pending = [u for u in p.upstream[other.name]
                        if (o := result.outcomes.get(u)) and o.status == "would run"]
             if reason is None and dry_run and pending:
                 reason = f"after {', '.join(pending)}"
-            if reason:
-                flagged.add(other.name)
+            if not reason:
+                continue
+            flagged.add(other.name)
+            if gate:
+                text = (f"--only left out '{other.name}', which may go stale ({reason}): "
+                        f"'{step.name}' fails if it does")
+            else:
                 text = (f"--only left out '{other.name}', which is not up to date ({reason}): "
                         f"'{step.name}' depends on it")
-                result.warnings.append(text)
-                self.report.warning(text)
+            result.warnings.append(text)
+            self.report.warning(text)
+        if not blockers:
+            return None
+        it = "it" if len(blockers) == 1 else "them"
+        return f"--only left out {'; '.join(blockers)}: select {it} too"
 
     def _step(self, step: Step, issues: list[str], result: RunResult,
-              forced: bool, dry_run: bool) -> Outcome:
+              forced: bool, dry_run: bool, gate: str | None = None) -> Outcome:
         p = self.pipeline
         bad = "warned" if not step.critical else "failed"
 
@@ -380,6 +405,8 @@ class Orchestrator:
         if broken:
             status = "skipped" if not step.critical else "failed"
             return Outcome(status, f"upstream step(s) did not complete: {', '.join(broken)}")
+        if gate:
+            return Outcome("skipped" if not step.critical else "failed", gate)
         pending = [u for u in p.upstream[step.name]
                    if (o := result.outcomes.get(u)) and o.status == "would run"]
         if dry_run and pending:
