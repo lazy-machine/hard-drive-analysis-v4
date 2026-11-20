@@ -11,7 +11,9 @@ import importlib.machinery as machinery
 import json
 import os
 import signal
+import site
 import sys
+import sysconfig
 import threading
 import time
 import traceback
@@ -63,9 +65,35 @@ class _SourceLoader(machinery.SourceFileLoader):
         return self.source_to_code(self.get_data(path), path)
 
 
-def _compile_from_source(roots: list[str]) -> None:
-    """Import modules under ``roots`` from source; installed packages keep their cache."""
-    resolved = [Path(r).resolve() for r in roots]
+def _forms(path: str) -> set[Path]:
+    """A path as given and with symlinks resolved: either may be the one under a root."""
+    given = Path(os.path.abspath(path))
+    return {given, given.resolve()}
+
+
+def _installed_dirs() -> set[Path]:
+    dirs = {sysconfig.get_path(k) for k in ("stdlib", "platstdlib", "purelib", "platlib")}
+    dirs.update(site.getsitepackages())
+    dirs.add(site.getusersitepackages())
+    return set().union(*(_forms(d) for d in dirs if d))
+
+
+def is_step_code_dir(entry: str, roots: set[Path], installed: set[Path]) -> bool:
+    """Under a ``python_path`` root and not an installed-packages directory (a project
+    ``.venv`` sits under the default root ``.``)."""
+    if not os.path.isdir(entry):
+        return False
+    for path in _forms(entry):
+        if any(path.is_relative_to(r) for r in roots) and \
+                not any(path.is_relative_to(d) for d in installed):
+            return True
+    return False
+
+
+def _compile_from_source(python_path: list[str]) -> None:
+    """Import step code from source; installed packages keep their cache."""
+    roots = set().union(*(_forms(r) for r in python_path))
+    installed = _installed_dirs()
     finder = machinery.FileFinder.path_hook(
         (machinery.ExtensionFileLoader, machinery.EXTENSION_SUFFIXES),
         (_SourceLoader, machinery.SOURCE_SUFFIXES),
@@ -73,8 +101,7 @@ def _compile_from_source(roots: list[str]) -> None:
     )
 
     def hook(entry: str) -> machinery.FileFinder:
-        path = Path(entry or ".").resolve()
-        if not path.is_dir() or not any(path.is_relative_to(r) for r in resolved):
+        if not is_step_code_dir(entry or ".", roots, installed):
             raise ImportError("not a pipeline path")
         return finder(entry)
 

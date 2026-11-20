@@ -5,8 +5,10 @@ from __future__ import annotations
 import importlib.util
 import os
 import py_compile
+import sysconfig
 from pathlib import Path
 
+from data_pipeline import worker
 from test_runner_pipeline import make, run, statuses
 
 STEP = """
@@ -59,3 +61,27 @@ def test_worker_writes_no_bytecode_for_step_code(tmp_path):
     r, _ = run(cfg)
     assert statuses(r) == {"s": "ran"}
     assert not (tmp_path / "steps" / "__pycache__").exists()
+
+
+def test_symlinked_package_submodule_runs_new_source(tmp_path):
+    cfg = make(tmp_path, STEP.format(module="pkg.mod"))
+    pkg = tmp_path / "elsewhere" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (tmp_path / "steps" / "pkg").symlink_to(pkg, target_is_directory=True)
+    (tmp_path / "steps" / "helper.py").write_text(HELPER.format(tag="B"))
+    plant_stale_pyc(pkg / "mod.py", CODE.format(tag="A"), CODE.format(tag="B"))
+    assert run(cfg)[0].ok
+    assert (tmp_path / "o.txt").read_text() == "BB"
+
+
+def test_project_venv_under_root_keeps_bytecode_cache(tmp_path):
+    site = tmp_path / ".venv" / "lib" / "site-packages"
+    (site / "numpy").mkdir(parents=True)
+    (tmp_path / "steps").mkdir()
+    roots, installed = {tmp_path}, {site}
+    assert worker.is_step_code_dir(str(tmp_path / "steps"), roots, installed)
+    assert not worker.is_step_code_dir(str(site), roots, installed)
+    assert not worker.is_step_code_dir(str(site / "numpy"), roots, installed)
+    assert not worker.is_step_code_dir(str(tmp_path / "steps" / "x.zip"), roots, installed)
+    assert Path(sysconfig.get_path("purelib")).resolve() in worker._installed_dirs()
