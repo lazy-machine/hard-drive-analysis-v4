@@ -46,16 +46,19 @@ project and an HDD for the downloads.
 
 ## Setup
 
-### 1. Install and test
-
-No data needed. The tests use a small synthetic panel and take about 4 minutes.
+### 1. Install
 
 ```bash
 git clone https://github.com/lazy-machine/hard-drive-analysis-v4.git
 cd hard-drive-analysis-v4
 uv sync
-uv run pytest -q
 ```
+
+Optional, for developers: `uv run pytest -q` runs the tests (about 4 minutes, no data
+needed: they use a small synthetic panel). The analysis does not need them.
+
+If you already have the panel, put it in place as in [The panel](#the-panel) and go to
+step 5.
 
 ### 2. Choose where the downloads go
 
@@ -109,14 +112,34 @@ sha=$(sha256sum dataset/dataset.parquet | cut -d' ' -f1) && [[ $sha =~ ^[0-9a-f]
 
 ### 5. Run
 
+The committed scale is `small`: a quick check that everything works, not the results. For
+real results switch to `full` first (see [Scales](#scales)):
+
+```bash
+sed -i 's/^scale = "small"/scale = "full"/' config/sample.toml
+```
+
+Then:
+
 ```bash
 uv run data-pipeline -n
 uv run data-pipeline
 ```
 
 The first line is a dry run: it shows what would run, and why. The second runs everything
-that is out of date. Results land in `build/report/`. Each long step logs its progress to
-`build/logs/<step>.log`.
+that is out of date. Results land in `build/report/` (`results.md`, `analysis.md`).
+
+The console prints one line per finished step, so it can stay quiet for many minutes. To
+see more:
+
+- `uv run data-pipeline -F` prints each step's output live.
+- From a second terminal, `tail -F build/logs/<step>.log` follows a long step's progress
+  lines.
+- `build/.pipeline/logs/<step>.log` holds each step's full output, from its last run.
+
+Ctrl-C stops a run, and so does closing the terminal. Each step is checkpointed as soon as
+it finishes, so the next `uv run data-pipeline` starts at the interrupted step. To keep a
+run going after logout, start it with `nohup uv run data-pipeline > run.log 2>&1 &`.
 
 ## Scales
 
@@ -134,11 +157,17 @@ committed as `small`; use `full` for real results.
 - Changing the scale reruns only the steps that depend on it.
 - Sampled drives and snapshots carry weights that undo the sampling, so every scale
   estimates the same numbers. Smaller scales give wider intervals.
+- The `full` figures come from the 2026-11-18 run on the machine above; `small` and
+  `medium` are older. The comments in `config/sample.toml` record earlier runs on older
+  code and are out of date: trust this table.
+- A later run reruns only the steps whose code, params or inputs changed, and those after
+  them. With nothing changed it runs no step.
 
 Two environment variables tune resources without causing any step to rerun:
 `HDA_MEMORY_FRACTION` (share of the machine's memory DuckDB may use, default 0.6) and
 `HDA_THREADS` (threads for DuckDB and LightGBM, worker processes for the bootstrap; default:
-one per logical CPU, and for LightGBM whatever OpenMP picks).
+one per logical CPU, and for LightGBM whatever OpenMP picks). Lower them when other work
+shares the machine, for example `HDA_THREADS=8 uv run data-pipeline`.
 
 ## Commands
 
@@ -183,6 +212,36 @@ panel_download ─► panel_convert ─► dataset.parquet ─► drive_index �
 The runner (`data_pipeline`) and the data gate (`data_verify`) live in `src/`; nothing
 outside this repository is needed. The runner runs each step in a fresh subprocess and
 skips it when its code, params and inputs are unchanged.
+
+## The panel
+
+`dataset/dataset.parquet` is Backblaze's drive-stats data for 2016 Q1 to 2025 Q4 (3,653
+days) in one parquet file: 646,777,037 rows, one per drive per day, 478,464 drives.
+`config/panel-schema.toml` lists its 198 columns in order with their types: `date`,
+`serial_number`, `model`, `capacity_bytes`, `failure`, the SMART attributes as
+`smart_<N>_normalized` and `smart_<N>_raw`, a few datacenter columns, and `filename` (the
+source CSV). `panel_convert` builds it (Setup step 3).
+
+The pipeline accepts only the file whose sha256 is pinned in `pipeline.toml`. The results
+above come from the panel pinned there now,
+`a84f5d5501b8619a8d8db01216ab83bf941611ba5246af6865323d6e162187d9`.
+
+To use a panel you already have, link it into place and check it (replace
+`/path/to/dataset.parquet` with your file; copying it works too):
+
+```bash
+mkdir -p dataset && ln -s /path/to/dataset.parquet dataset/dataset.parquet && uv run data-pipeline -n
+```
+
+The dry run hashes the file (about a minute). A matching panel shows `panel_download` and
+`panel_convert` as `kept`. A different one makes them `failed`, with "does not match its
+sha256". `sha256sum dataset/dataset.parquet` prints the hash on its own. If it does not
+match:
+
+- You built it with `panel_convert`: expected, the bytes differ between builds (see
+  [Raw data](#raw-data)). Pin it as in Setup step 4.
+- It came from anywhere else: it is not the panel this pipeline expects, and the sha256 is
+  the only check. Do not pin it. Remove the link and build the panel (Setup steps 2 to 4).
 
 ## Raw data
 
