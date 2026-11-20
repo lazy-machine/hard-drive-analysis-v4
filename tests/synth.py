@@ -1,8 +1,8 @@
 """A small synthetic Backblaze-style panel with known answers.
 
 It reproduces the quirks the pipeline must handle: an SSD model, whitespace variants of a
-model name, gaps in daily reporting, same-day duplicate rows, a drive that keeps
-reporting after its failure, VARCHAR-typed SMART columns, capacity quirks (a day of rounded
+model name, gaps in daily reporting, same-day duplicate rows, drives that keep
+reporting after their failure, VARCHAR-typed SMART columns, capacity quirks (a day of rounded
 values, -1 on a first day, a drive that never reports one, a value that changes later), a
 model string that changes mid-life, and failures on both sides of the train/test cutoff.
 Failing drives show a rising reallocated-sector count (smart_5) in their last weeks, so a
@@ -93,7 +93,7 @@ def make_panel(columns: list[str], n_drives: int = 360, seed: int = 8) -> pd.Dat
             if rng.random() < 0.01:                    # same-day duplicate, less complete
                 dup = dict(rows[-1], filename=f"{d}-b.csv", smart_194_raw=None)
                 rows.append(dup)
-        if i == 11 and fail_day is not None:           # keeps reporting after failure
+        if i % 10 == 1 and fail_day is not None:       # keeps reporting after failure
             for t in range(fail_day + 1, min(fail_day + 5, days)):
                 d = START + timedelta(days=t)
                 rows.append({**rows[-1], "date": d, "failure": 0, "filename": f"{d}.csv"})

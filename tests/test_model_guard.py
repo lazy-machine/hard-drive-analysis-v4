@@ -77,3 +77,15 @@ def test_row_wise_never_estimated_below_column_wise():
     for cols in (5, 65, 120, 300):
         row = model._memory_need(10**7, cols, 0, "row")
         assert row >= model._memory_need(10**7, cols, 0, "col")
+
+
+def test_stored_params_ignore_threads_and_memory_fallback(monkeypatch):
+    p = {"lgbm": {"num_leaves": 31}, "seed": 42}
+    monkeypatch.setenv("HDA_THREADS", "2")
+    train, stored = model._params(p, "row", "row")
+    monkeypatch.setenv("HDA_THREADS", "16")
+    fallback, stored_fallback = model._params(p, "row", "col")
+    assert stored == stored_fallback and "num_threads" not in stored
+    assert stored["force_row_wise"] and "force_col_wise" not in stored
+    assert fallback["force_col_wise"] and "force_row_wise" not in fallback
+    assert (train["num_threads"], fallback["num_threads"]) == (2, 16)
