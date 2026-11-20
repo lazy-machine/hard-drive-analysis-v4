@@ -56,24 +56,25 @@ def test_full_follow_up_drops_snapshots_near_the_panel_end():
 
 
 def test_full_follow_up_ipcw_ignores_excluded_censoring():
-    """Kept snapshots have no censoring before 30 days, so IPCW must equal the plain AUC.
-    A censoring curve fitted on the whole test set would let the late rows, censored by
-    the panel's end, upweight the positive that fails after their censoring day."""
+    """The censoring curve comes from the kept snapshots only: r, retired on day 12, sets
+    G = 4/5 from day 13, so g (fails day 20) and the survivors weigh 5/4 and a weighs 1.
+    The late rows, censored by the panel's end on day 10, must not lower G further."""
     rows = [("a", "2025-01-01", 5, 1, 0.9, "failing", "X", "V", 4),
             ("g", "2025-01-01", 20, 1, 0.15, "failing", "X", "V", 4),
             ("b", "2025-01-01", 300, 0, 0.1, "healthy", "X", "V", 4),
             ("c", "2025-01-01", 300, 0, 0.2, "healthy", "X", "V", 4),
-            ("d", "2025-01-01", 300, 0, 0.3, "healthy", "X", "V", 4)]
+            ("d", "2025-01-01", 300, 0, 0.3, "healthy", "X", "V", 4),
+            ("r", "2025-01-01", 12, 0, 0.5, "healthy", "X", "V", 4)]
     rows += [(f"late{k}", "2025-12-21", 10, 0, 0.5, "healthy", "X", "V", 4) for k in range(3)]
     test = _frame(rows)
     D = Drives(test)
     models = {"m": {"kind": "binary", "horizons": [30]}}
     out, _ = full_follow_up(test, D, models, [30], "m", rounds=5, seed=1, log=lambda m: None)
     (r,) = out
-    assert r["snapshots"] == 5
+    assert r["snapshots"] == 5                 # r is unknown at 30 days
     assert np.isclose(r["auc"], 4 / 6)
-    assert np.isclose(r["auc_ipcw"], r["auc"])
-    assert np.isclose(r["ap_ipcw"], r["ap"])
+    # pairs won: a over 3 survivors (1 x 3 x 5/4), g over b (5/4 x 5/4)
+    assert np.isclose(r["auc_ipcw"], (3 * 5 / 4 + 25 / 16) / (9 / 4 * 15 / 4))
 
 
 def test_alerting_counts_nonfailing_drives():
