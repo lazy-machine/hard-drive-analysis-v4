@@ -264,7 +264,8 @@ sql = """WITH w AS (
                            AND c.failure_date <= least(c.last_date, DATE '${train_end}') END)
          SELECT w.serial_number, w.date, w.drive_weight, s.weight FROM w
          LEFT JOIN snapshots s USING (serial_number, date)
-         WHERE s.weight IS NULL OR abs(s.weight - w.drive_weight) >= 1e-6"""
+         WHERE s.weight IS NULL OR w.drive_weight IS NULL
+            OR abs(s.weight - w.drive_weight) >= 1e-6"""
 
 [[steps.params.assert]]
 name = "cohort_drives_have_snapshots"

@@ -1,5 +1,6 @@
 """Cohort selection rules, contract validation, and the gate catching injected bugs."""
 
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -277,15 +278,25 @@ FIRST_FAILING = "SELECT min(serial_number) FROM cohort WHERE failure_date IS NOT
 def test_gate_catches_wrong_stratum(pipeline_run, tmp_path):
     """A failing drive sampled as healthy, its weight consistent with the wrong stratum."""
     project, _ = pipeline_run
-    healthy = load_sample(project / "config" / "sample.toml")["healthy_fraction"]
-    blocking = _gate_on(project, tmp_path, cohort_sql=f"""
-        SELECT * REPLACE (
-            CASE WHEN serial_number = ({FIRST_FAILING}) THEN 'healthy' ELSE stratum END AS stratum,
-            CASE WHEN serial_number = ({FIRST_FAILING}) THEN 1 / {healthy} ELSE drive_weight END
-                AS drive_weight)
-        FROM cohort""")
+    sample = load_sample(project / "config" / "sample.toml")
+    ratio = sample["failing_fraction"] / sample["healthy_fraction"]
+    first = f"""(SELECT min(serial_number) FROM read_parquet('{project}/build/cohort.parquet')
+                 WHERE failure_date IS NOT NULL)"""
+    blocking = _gate_on(
+        project, tmp_path,
+        cohort_sql=f"""
+            SELECT * REPLACE (
+                CASE WHEN serial_number = {first} THEN 'healthy' ELSE stratum END AS stratum,
+                CASE WHEN serial_number = {first} THEN drive_weight * {ratio}
+                     ELSE drive_weight END AS drive_weight)
+            FROM cohort""",
+        snapshots_sql=f"""
+            SELECT * REPLACE (CASE WHEN serial_number = {first} THEN weight * {ratio}
+                              ELSE weight END AS weight)
+            FROM snapshots""")
     assert "custom.cohort_stratum_matches_rule" in blocking
-    assert "assert.cohort_weights_match_sampling" not in blocking
+    assert not blocking & {"assert.cohort_weights_match_sampling", "assert.snapshot_weights_valid",
+                           "assert.dense_window_complete"}
 
 
 @pytest.mark.parametrize("column", ["first_date", "last_date", "failure_date"])
@@ -296,3 +307,41 @@ def test_gate_catches_cohort_dates_off_drive_index(pipeline_run, tmp_path, colum
                           ELSE {column} END AS {column})
         FROM cohort""")
     assert "assert.cohort_dates_match_drives" in blocking
+
+
+def _assert_sql(name: str, **values) -> str:
+    import re
+    import tomllib
+
+    step = next(s for s in tomllib.loads((ROOT / "pipeline.toml").read_text())["steps"]
+                if s["name"] == "verify")
+    sql = next(a["sql"] for a in step["params"]["assert"] if a["name"] == name)
+    return re.sub(r"\$\{(\w+)\}", lambda m: str(values[m[1]]), sql)
+
+
+def test_dense_window_stops_at_split_bounds():
+    """Dense windows that cross test_start or train_end: only in-split days are required.
+
+    T (test) fails 4 days after test_start, with panel history before it. R (train) fails
+    on train_end. L (train) fails after train_end, so it has no dense window at all.
+    """
+    split = STUDY["split"]
+    sql = _assert_sql("dense_window_complete", dense=30, test_start=split["test_start"],
+                      train_end=split["train_end"])
+    con = duckdb.connect()
+    con.sql("""CREATE TABLE cohort AS SELECT * FROM (VALUES
+               ('T', 'test', 1.0, DATE '2024-01-05', DATE '2024-01-05'),
+               ('R', 'train', 1.0, DATE '2023-12-31', DATE '2024-06-01'),
+               ('L', 'train', 1.0, DATE '2024-01-05', DATE '2024-02-01'))
+               c(serial_number, split, drive_weight, failure_date, last_date)""")
+    con.sql("""CREATE TABLE panel AS
+               SELECT serial_number, CAST(d AS DATE) AS date FROM cohort,
+                      range(failure_date - INTERVAL 40 DAY, least(failure_date,
+                            CASE split WHEN 'test' THEN failure_date ELSE DATE '2023-12-31' END)
+                            + INTERVAL 1 DAY, INTERVAL 1 DAY) t(d)""")
+    con.sql("""CREATE TABLE snapshots AS SELECT serial_number, date, 1.0 AS weight FROM panel
+               WHERE (serial_number = 'T' AND date >= DATE '2024-01-01')
+                  OR (serial_number = 'R' AND date > DATE '2023-12-01')""")
+    assert con.sql(sql).fetchall() == []
+    con.sql("DELETE FROM snapshots WHERE serial_number = 'T' AND date = DATE '2024-01-01'")
+    assert [r[:2] for r in con.sql(sql).fetchall()] == [("T", date(2024, 1, 1))]
