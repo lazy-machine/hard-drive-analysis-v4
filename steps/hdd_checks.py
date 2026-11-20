@@ -57,10 +57,11 @@ def cohort_stratum_matches_rule(v):
     """Every cohort drive's stratum is what drives.stratum gives, so its weight follows.
 
     cohort_weights_match_sampling checks drive_weight against stratum; this pins stratum
-    to the drive's failure date, with the rule the cohort step uses.
+    to the drive's failure date and split, with the rule the cohort step uses.
     """
     cohort = v.dataset("cohort")
-    wrong = cohort.loc[cohort["stratum"].to_numpy() != stratum(cohort), "serial_number"]
+    expected = stratum(cohort, v.var("train_end"))
+    wrong = cohort.loc[cohort["stratum"].to_numpy() != expected, "serial_number"]
     v.add("cohort_stratum_matches_rule", wrong.empty,
           f"{len(wrong)} of {len(cohort)} cohort drives in the wrong sampling stratum",
           category="weights", details={"drives": len(wrong), "examples": sorted(wrong)[:5]},

@@ -134,7 +134,11 @@ def extract(ctx):
 
 
 def model_levels(cohort: pd.DataFrame, top: int) -> list[str]:
-    """Categorical levels for drive model, from train drives only (no test information)."""
+    """Categorical levels for drive model, from train drives only (no test information).
+
+    Counts sampled drives, unweighted. The sample depends only on failures by train_end
+    (drives.select_cohort), so nothing after the cutoff picks the levels.
+    """
     train = cohort[cohort["split"] == "train"]
     counts = train.groupby("model").size().reset_index(name="n")
     counts = counts.sort_values(["n", "model"], ascending=[False, True])
@@ -165,8 +169,8 @@ def snapshots(ctx):
     Sampling: within the split's time window, a snapshot every stride_days (drive-specific
     offset, weight stride_days) plus every day in the dense_days before a failure that is
     visible in the split (weight 1), times the drive's inverse sampling weight. A train
-    drive failing after train_end gets no dense days, so its sampling does not depend on
-    what happens after the cutoff.
+    drive failing after train_end gets no dense days and the healthy stratum's weight, so
+    its sampling does not depend on what happens after the cutoff.
     """
     log = Progress(ctx)
     study = load_study(ctx.inputs["study"])

@@ -64,6 +64,29 @@ def test_sampling_weights_are_inverse_fractions():
     assert 140 < kept_healthy < 260  # about 10% of 2000
 
 
+def test_failure_after_train_end_does_not_pick_train_drives():
+    """A train/val drive failing after train_end is sampled and weighted as if healthy."""
+    serials = [f"S{i}" for i in range(3000)]
+    scale = dict(SCALE, failing_fraction=1.0, healthy_fraction=0.1)
+
+    def cohort_with(failure):
+        rows = [(s, "ST4000DM000", "2020-01-01", "2025-12-31", failure, 4e12) for s in serials]
+        return select_cohort(drives_frame(rows), STUDY, scale)[0].set_index("serial_number")
+
+    healthy, late, early = (cohort_with(f) for f in (None, "2024-06-01", "2023-06-01"))
+    trainval = lambda c: c[c["split"] != "test"]  # noqa: E731
+    n_trainval = sum(stable_bucket(s) < 80 for s in serials)
+    assert 0.07 * n_trainval < len(trainval(healthy)) < 0.13 * n_trainval
+    pd.testing.assert_frame_equal(trainval(late)[["stratum", "drive_weight"]],
+                                  trainval(healthy)[["stratum", "drive_weight"]])
+    # the same failure by train_end, or after it on a test drive, makes the drive failing
+    assert len(trainval(early)) == n_trainval
+    assert (trainval(early)["stratum"] == "failing").all()
+    test = late[late["split"] == "test"]
+    assert len(test) == len(serials) - n_trainval
+    assert (test["stratum"] == "failing").all() and (test["drive_weight"] == 1.0).all()
+
+
 def test_contract_validation(tmp_path):
     bad = (ROOT / "config" / "study.toml").read_text().replace(
         "horizons = [7, 30, 90, 180, 365]", "horizons = [7, 45]")
@@ -209,6 +232,23 @@ def _gate_on(project, tmp_path, snapshots_sql=None, cohort_sql=None):
     return set(report["blocking"])
 
 
+def test_gate_catches_cohort_weight_from_failure_after_train_end(pipeline_run, tmp_path):
+    """A train/val drive weighted as failing for a failure after train_end."""
+    project, _ = pipeline_run
+    late = """split <> 'test' AND failure_date > DATE '2023-12-31'"""
+    con = duckdb.connect()
+    cohort = f"read_parquet('{project}/build/cohort.parquet')"
+    strata = con.sql(f"SELECT DISTINCT stratum FROM {cohort} WHERE {late}").fetchall()
+    assert strata == [("healthy",)], "synthetic data should contain such drives"
+    sample = load_sample(project / "config" / "sample.toml")
+    blocking = _gate_on(project, tmp_path, cohort_sql=f"""
+        SELECT * REPLACE (CASE WHEN {late} THEN 'failing' ELSE stratum END AS stratum,
+                          CASE WHEN {late} THEN {1 / sample['failing_fraction']}
+                               ELSE drive_weight END AS drive_weight)
+        FROM cohort""")
+    assert "custom.cohort_stratum_matches_rule" in blocking
+
+
 def test_gate_catches_non_float_feature(pipeline_run, tmp_path):
     project, _ = pipeline_run
     blocking = _gate_on(project, tmp_path, snapshots_sql=(
@@ -280,7 +320,7 @@ def test_gate_catches_wrong_stratum(pipeline_run, tmp_path):
     sample = load_sample(project / "config" / "sample.toml")
     ratio = sample["failing_fraction"] / sample["healthy_fraction"]
     first = f"""(SELECT min(serial_number) FROM read_parquet('{project}/build/cohort.parquet')
-                 WHERE failure_date IS NOT NULL)"""
+                 WHERE stratum = 'failing')"""
     blocking = _gate_on(
         project, tmp_path,
         cohort_sql=f"""

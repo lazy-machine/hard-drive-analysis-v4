@@ -144,13 +144,16 @@ def assign_split(bucket: int, split_cfg: dict) -> str:
     raise ValueError(f"bucket {bucket} is in no split")
 
 
-def stratum(d: pd.DataFrame) -> np.ndarray:
+def stratum(d: pd.DataFrame, train_end) -> np.ndarray:
     """Sampling stratum per drive, 'failing' or 'healthy'. The gate checks the cohort with it.
 
-    Uses the whole panel ("fails at some point"), which is fine for inverse-probability
-    weighting: the weight is the true inclusion odds.
+    'failing' means a failure the drive's split may see: any time for test drives, by
+    train_end for train/val. Training damps the weights (weight_power), so a stratum built
+    from later failures would let them pick the training drives.
     """
-    return np.where(d["failure_date"].notna(), "failing", "healthy")
+    failure = pd.to_datetime(d["failure_date"])
+    seen = failure.notna() & ((d["split"] == "test") | (failure <= pd.Timestamp(train_end)))
+    return np.where(seen, "failing", "healthy")
 
 
 def select_cohort(drives: pd.DataFrame, study: dict, scale: dict) -> tuple[pd.DataFrame, dict]:
@@ -183,7 +186,7 @@ def select_cohort(drives: pd.DataFrame, study: dict, scale: dict) -> tuple[pd.Da
     counts["excluded_outside_window"] = int((~eligible).sum())
     d = d[eligible].copy()
 
-    d["stratum"] = stratum(d)
+    d["stratum"] = stratum(d, train_end)
     fraction = np.where(d["stratum"] == "failing",
                         scale["failing_fraction"], scale["healthy_fraction"])
     u = np.array([stable_unit(s, "sample") for s in d["serial_number"]])
