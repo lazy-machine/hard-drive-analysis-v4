@@ -7,6 +7,7 @@ gets a fresh interpreter, so no memory, globals or imported modules leak between
 from __future__ import annotations
 
 import importlib
+import importlib.machinery as machinery
 import json
 import os
 import signal
@@ -50,6 +51,37 @@ def _stop_with_runner(runner: int) -> None:
     threading.Thread(target=watch, daemon=True).start()
 
 
+class _SourceLoader(machinery.SourceFileLoader):
+    """Compiles from source every time.
+
+    The runner keys a checkpoint on the source's hash, but a ``.pyc`` is trusted on the
+    source's mtime and size, so an edit that keeps both would run the old code.
+    """
+
+    def get_code(self, fullname: str):
+        path = self.get_filename(fullname)
+        return self.source_to_code(self.get_data(path), path)
+
+
+def _compile_from_source(roots: list[str]) -> None:
+    """Import modules under ``roots`` from source; installed packages keep their cache."""
+    resolved = [Path(r).resolve() for r in roots]
+    finder = machinery.FileFinder.path_hook(
+        (machinery.ExtensionFileLoader, machinery.EXTENSION_SUFFIXES),
+        (_SourceLoader, machinery.SOURCE_SUFFIXES),
+        (machinery.SourcelessFileLoader, machinery.BYTECODE_SUFFIXES),
+    )
+
+    def hook(entry: str) -> machinery.FileFinder:
+        path = Path(entry or ".").resolve()
+        if not path.is_dir() or not any(path.is_relative_to(r) for r in resolved):
+            raise ImportError("not a pipeline path")
+        return finder(entry)
+
+    sys.path_hooks.insert(0, hook)
+    sys.path_importer_cache.clear()
+
+
 def main(argv: list[str]) -> int:
     spec_path, result_path = argv
     spec = json.loads(Path(spec_path).read_text())
@@ -58,6 +90,7 @@ def main(argv: list[str]) -> int:
     for p in reversed(spec["python_path"]):
         if p not in sys.path:
             sys.path.insert(0, p)
+    _compile_from_source(spec["python_path"])
 
     try:
         module = importlib.import_module(spec["module"])
