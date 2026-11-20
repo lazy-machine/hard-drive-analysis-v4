@@ -60,7 +60,7 @@ from common import (
 from metrics import (
     DriveCells, RankedScores, bootstrap_drive_counts, censoring_survival, concordance,
     ipcw_weights, km_failure, one_per_drive, uno_concordance, weighted_auc,
-    weighted_average_precision, weighted_brier, weighted_quantile_threshold,
+    weighted_average_precision, weighted_brier, weighted_median, weighted_quantile_threshold,
 )
 from survival import known_status
 
@@ -183,15 +183,16 @@ class Drives:
 
 
 def _ranking_metrics(test, D: Drives, models, H, mask, rounds, seed, reference=None,
-                     drive_level=False):
+                     drive_level=False, G=None):
     """ROC-AUC/PR-AUC (+ IPCW, + drive-level) with bootstrap intervals on rows `mask` at
-    horizon H. Returns ({model: row}, {model: bootstrap AUC/AP gains of the reference})."""
+    horizon H. Returns ({model: row}, {model: bootstrap AUC/AP gains of the reference}).
+    G: the censoring curve for the IPCW columns, D.G (whole test set) by default."""
     status = known_status(D.d, D.e, H)
     mask = mask & (status >= 0)
     y, w = status[mask], D.w[mask]
     if y.size == 0 or y.min() == y.max():
         return None, None
-    iw = ipcw_weights(D.d, D.e, D.w, H, D.G)[mask]
+    iw = ipcw_weights(D.d, D.e, D.w, H, D.G if G is None else G)[mask]
     codes, dw = D.codes[mask], D.drive_w[mask]
     scores = {n: s[mask] for n, i in models.items() if (s := score_of(test, n, i, H)) is not None}
     ranked = {n: RankedScores(s, y) for n, s in scores.items()}
@@ -1002,7 +1003,8 @@ def life(test, models, edges, D=None, rounds=0, seed=0) -> tuple[list[dict], pd.
         q10 = test[f"{name}__q10_days"].to_numpy()
         q90 = test[f"{name}__q90_days"].to_numpy()
         fails = status == 1
-        covered = (d >= np.floor(q10)) & (d <= np.ceil(q90))
+        # P(d < q) = q for a calibrated quantile q, so the 80% interval is q10 <= d < q90
+        covered = (d >= q10) & (d < q90)
         finite = np.isfinite(med)
 
         def wmean(x, m):
@@ -1059,7 +1061,7 @@ def life(test, models, edges, D=None, rounds=0, seed=0) -> tuple[list[dict], pd.
                     "model": name, "actual_days_to_failure": f"{lo}-{hi - 1}", "lo": lo,
                     "snapshots": int(m.sum()),
                     "share_median_within_horizon": wmean(finite.astype(float), m),
-                    "median_of_predicted_median": float(np.median(med[m])),
+                    "median_of_predicted_median": weighted_median(med[m], w[m]),
                     "coverage_q10_q90": wmean(covered.astype(float), m),
                 })
     return summary, pd.DataFrame(table)
@@ -1082,14 +1084,18 @@ def full_follow_up(test, D, models, horizons, reference, rounds, seed, log):
     horizons. Here a snapshot counts only if it is dated at least H - 1 days before the
     panel's last day, for positives and negatives alike. Drives retired without failing
     inside the horizon are still unknown (and IPCW-weighted in the _ipcw columns): this
-    removes the administrative asymmetry, not informative retirement.
+    removes the administrative asymmetry, not informative retirement. The _ipcw columns
+    fit their censoring curve on the kept snapshots, so the excluded late ones, censored
+    by the panel's end, do not shape the weights.
     """
     date = pd.to_datetime(test["date"])
     room = (pd.to_datetime(test["last_date"]).max() - date).dt.days.to_numpy()
     rows, diffs = [], []
     for H in horizons:
         keep = room >= H - 1
-        res, gains = _ranking_metrics(test, D, models, H, keep, rounds, seed + H, reference)
+        G = censoring_survival(D.d[keep], D.e[keep], D.w[keep])
+        res, gains = _ranking_metrics(test, D, models, H, keep, rounds, seed + H, reference,
+                                      G=G)
         if res is None:
             continue
         observed = km_failure(D.d[keep], D.e[keep], D.w[keep], H)

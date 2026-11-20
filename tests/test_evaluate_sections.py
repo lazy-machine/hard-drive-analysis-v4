@@ -55,6 +55,27 @@ def test_full_follow_up_drops_snapshots_near_the_panel_end():
     assert r["last_snapshot_date"] == "2025-01-01"
 
 
+def test_full_follow_up_ipcw_ignores_excluded_censoring():
+    """Kept snapshots have no censoring before 30 days, so IPCW must equal the plain AUC.
+    A censoring curve fitted on the whole test set would let the late rows, censored by
+    the panel's end, upweight the positive that fails after their censoring day."""
+    rows = [("a", "2025-01-01", 5, 1, 0.9, "failing", "X", "V", 4),
+            ("g", "2025-01-01", 20, 1, 0.15, "failing", "X", "V", 4),
+            ("b", "2025-01-01", 300, 0, 0.1, "healthy", "X", "V", 4),
+            ("c", "2025-01-01", 300, 0, 0.2, "healthy", "X", "V", 4),
+            ("d", "2025-01-01", 300, 0, 0.3, "healthy", "X", "V", 4)]
+    rows += [(f"late{k}", "2025-12-21", 10, 0, 0.5, "healthy", "X", "V", 4) for k in range(3)]
+    test = _frame(rows)
+    D = Drives(test)
+    models = {"m": {"kind": "binary", "horizons": [30]}}
+    out, _ = full_follow_up(test, D, models, [30], "m", rounds=5, seed=1, log=lambda m: None)
+    (r,) = out
+    assert r["snapshots"] == 5
+    assert np.isclose(r["auc"], 4 / 6)
+    assert np.isclose(r["auc_ipcw"], r["auc"])
+    assert np.isclose(r["ap_ipcw"], r["ap"])
+
+
 def test_alerting_counts_nonfailing_drives():
     rows = []
     # failing drive alerted in its last 30 days
