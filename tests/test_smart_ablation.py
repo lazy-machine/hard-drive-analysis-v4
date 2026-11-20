@@ -10,17 +10,22 @@ ROOT = Path(__file__).resolve().parent.parent
 POST_TRAINING = {"recalibrate_recent"}
 
 
-def _params(name: str) -> dict:
+def _training(name: str) -> dict:
+    """The step without what may differ: its name, outputs, and features."""
     steps = tomllib.loads((ROOT / "pipeline.toml").read_text())["steps"]
-    return next(s for s in steps if s["name"] == name)["params"]
+    step = dict(next(s for s in steps if s["name"] == name))
+    for key in ("name", "description", "outputs"):
+        step.pop(key)
+    step["params"] = {k: v for k, v in step["params"].items()
+                      if k not in {"features", *POST_TRAINING}}
+    return step
 
 
-def test_smart_and_nosmart_share_training_params():
-    smart, nosmart = _params("train_hazard_smart"), _params("train_hazard_nosmart")
-    assert (smart["features"], nosmart["features"]) == ("all", "context")
-    strip = {"features", *POST_TRAINING}
-    assert ({k: v for k, v in smart.items() if k not in strip}
-            == {k: v for k, v in nosmart.items() if k not in strip})
+def test_smart_and_nosmart_share_training_setup():
+    steps = {s["name"]: s for s in tomllib.loads((ROOT / "pipeline.toml").read_text())["steps"]}
+    assert steps["train_hazard_smart"]["params"]["features"] == "all"
+    assert steps["train_hazard_nosmart"]["params"]["features"] == "context"
+    assert _training("train_hazard_smart") == _training("train_hazard_nosmart")
 
 
 def test_history_spans_are_context_not_smart():
