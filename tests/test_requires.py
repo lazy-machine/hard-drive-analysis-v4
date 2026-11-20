@@ -7,6 +7,7 @@ there can be upgraded under a cached result.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -81,3 +82,12 @@ def test_specifiers_agree_across_steps():
         for r in map(Requirement, step.requires):
             seen.setdefault(canonicalize_name(r.name), set()).add(str(r.specifier))
     assert {k: v for k, v in seen.items() if len(v) > 1} == {}
+
+
+def test_watched_file_outside_python_path_is_scanned(tmp_path):
+    extra = tmp_path / "extra.py"
+    extra.write_text("import scipy\n")
+    step = next(s for s in PIPELINE.steps if s.name == "report")
+    watched = dataclasses.replace(step, watch=[str(extra)])
+    assert "scipy" not in needed(step)
+    assert "scipy" in needed(watched)
