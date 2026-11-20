@@ -108,6 +108,7 @@ def test_models_store_feature_names(pipeline_run):
     _, meta = load_booster(project / "build" / "models" / "hazard_nosmart.txt",
                            project / "build" / "models" / "hazard_nosmart.json")
     assert not any(f.startswith("smart_") for f in meta["features"])
+    assert any(f.startswith("window_days_") for f in meta["features"])
 
 
 def test_smart_signal_is_found(pipeline_run):

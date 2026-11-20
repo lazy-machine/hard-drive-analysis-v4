@@ -306,12 +306,12 @@ timeout = 21600
 
 [[steps]]
 name = "train_hazard_nosmart"
-description = "Ablation: same survival model without SMART (model, capacity, time in service)"
+description = "Ablation: same survival model and params without SMART (model, capacity, time in service, history spans)"
 function = "model:train"
 inputs = { snapshots = "build/snapshots.parquet", schema = "build/feature-schema.json", study = "config/study.toml" }
 outputs = { model = "build/models/hazard_nosmart.txt", meta = "build/models/hazard_nosmart.json" }
 depends_on = ["verify"]
-params = { histogram = "row", kind = "hazard", features = "context", seed = 42, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 1.0, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
+params = { histogram = "row", kind = "hazard", features = "context", seed = 42, weight_power = 0.5, num_boost_round = 2000, early_stopping_rounds = 100, lgbm = { learning_rate = 0.03, num_leaves = 31, min_child_samples = 200, feature_fraction = 0.8, bagging_fraction = 0.8, bagging_freq = 1, lambda_l2 = 5.0, cat_smooth = 20 } }
 requires = ["lightgbm>=4.6", "numpy", "pyarrow", "scipy"]
 watch = ["steps/common.py", "steps/survival.py"]
 timeout = 21600
