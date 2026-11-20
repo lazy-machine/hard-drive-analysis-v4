@@ -1014,8 +1014,8 @@ def _answer(disc, gains, metrics, ref, labels, tolerance) -> list[str]:
             + ("Yes. " if len(clear) == len(g) else
                "Partly. " if len(clear) else "Not clearly at this scale. ")
             + f"Adding SMART to what is known without it (drive model, capacity, time in "
-            f"service) improves ROC-AUC at {len(clear)} of {len(g)} horizons with a 95% "
-            "interval that excludes zero:")
+            f"service, days of recorded history) improves ROC-AUC at {len(clear)} of "
+            f"{len(g)} horizons with a 95% interval that excludes zero:")
         for _, r in g.sort_values("horizon").iterrows():
             out.append(f"  - {r['horizon']} days: {r['auc_gain']:+.3f} {_ci(r['auc_gain_ci'])}")
     r = _gain_row(gains, "hazard_nocritical", H)

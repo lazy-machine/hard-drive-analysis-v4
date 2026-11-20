@@ -143,10 +143,11 @@ def model_levels(cohort: pd.DataFrame, top: int) -> list[str]:
 def feature_schema(study: dict, levels: list[str]) -> dict:
     trends = trend_columns(study)
     windows = [f"window_days_{w}" for w in study["features"]["trend_windows"]]
-    smart = smart_columns(study) + [name for name, _, _ in trends] + windows
+    smart = smart_columns(study) + [name for name, _, _ in trends]
+    # window_days_* come from row dates, not SMART: context, so the no-SMART model keeps them
     return {
-        "features": CONTEXT_FEATURES + smart,
-        "groups": {"context": CONTEXT_FEATURES, "smart": smart},
+        "features": CONTEXT_FEATURES + smart + windows,
+        "groups": {"context": CONTEXT_FEATURES + windows, "smart": smart},
         "categorical": {"model_code": levels + ["other"], "vendor_code": VENDORS},
         "label": {"duration": "duration_days", "event": "event", "weight": "weight"},
     }
