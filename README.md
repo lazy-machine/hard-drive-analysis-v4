@@ -178,7 +178,7 @@ shares the machine, for example `HDA_THREADS=8 uv run data-pipeline`.
 | `uv run data-pipeline` | Run everything that is out of date |
 | `uv run data-pipeline -F` | The same, printing each step's output live |
 | `uv run data-pipeline -r STEP` | Run `STEP` again even if nothing changed |
-| `uv run data-pipeline -o STEP` | Look at `STEP` only: it runs if it is out of date (its inputs must exist). It fails if a step it reaches through `depends_on`, such as `verify`, is left out and not up to date |
+| `uv run data-pipeline -o STEP` | Look at `STEP` only: it runs if it is out of date (its inputs must exist). It fails (a non-critical step: is skipped) if a step it reaches through `depends_on`, such as `verify`, is left out and not up to date |
 | `uv run data-pipeline -f` | Run every step again even if nothing changed |
 | `uv run data-verify checks` | List every check of the data gate |
 | `uv run pytest -q` | All tests |

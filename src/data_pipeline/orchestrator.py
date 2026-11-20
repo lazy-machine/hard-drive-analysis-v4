@@ -286,7 +286,9 @@ class Orchestrator:
         selected = {s.name for s in steps}
         flagged: set[str] = set()
         for idx, step in enumerate(steps, 1):
-            gate = self._left_out(step, selected, flagged, result, dry_run) if only else None
+            gate = None
+            if only:
+                gate = self._left_out(step, selected, flagged, issues, result, dry_run)
             self.report.begin(idx, len(steps), step)
             outcome = self._step(step, issues.get(step.name, []), result,
                                  force or step.name in forced, dry_run, gate)
@@ -330,13 +332,14 @@ class Orchestrator:
         return dict.fromkeys(once, verdict)
 
     def _left_out(self, step: Step, selected: set[str], flagged: set[str],
-                  result: RunResult, dry_run: bool) -> str | None:
+                  issues: dict[str, list[str]], result: RunResult, dry_run: bool) -> str | None:
         """Check the upstream steps ``--only`` leaves out. Returns why ``step`` must not run.
 
         A left-out step reached through ``depends_on``, such as the gate, must have a valid
-        checkpoint: its failure in an earlier run must still block. Any other left-out step
-        that isn't current only gets a warning. Checked before each step, not once at the
-        start: a selected step that just ran can be what made the step left out go stale.
+        checkpoint and pass preflight: its failure in an earlier run must still block. Any
+        other left-out step that isn't current only gets a warning, as does a gate a dry run
+        cannot judge yet. Checked before each step, not once at the start: a selected step
+        that just ran can be what made the step left out go stale.
         """
         p = self.pipeline
         ancestors: set[str] = set()
@@ -357,20 +360,28 @@ class Orchestrator:
                 continue
             fp = checkpoint.fingerprint(p, other, self.state)
             reason = checkpoint.stale_reason(p, other, self.state, fp)
+            if gate and not reason and issues.get(other.name):
+                reason = "preflight failed: " + "; ".join(issues[other.name])
+            if gate and reason:
+                blockers.append(f"'{other.name}', which is not up to date ({reason})")
+                continue
+            if other.name in flagged:
+                continue
             pending = [u for u in p.upstream[other.name]
                        if (o := result.outcomes.get(u)) and o.status == "would run"]
             if reason is None and dry_run and pending:
                 reason = f"after {', '.join(pending)}"
             if not reason:
                 continue
+            flagged.add(other.name)
             if gate:
-                blockers.append(f"'{other.name}', which is not up to date ({reason})")
+                text = (f"--only left out '{other.name}', which may go stale ({reason}): "
+                        f"'{step.name}' fails if it does")
             else:
-                flagged.add(other.name)
                 text = (f"--only left out '{other.name}', which is not up to date ({reason}): "
                         f"'{step.name}' depends on it")
-                result.warnings.append(text)
-                self.report.warning(text)
+            result.warnings.append(text)
+            self.report.warning(text)
         if not blockers:
             return None
         it = "it" if len(blockers) == 1 else "them"

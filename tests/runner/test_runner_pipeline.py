@@ -555,11 +555,33 @@ def test_only_fails_a_step_when_a_selected_step_makes_the_gate_stale(tmp_path):
     assert statuses(result) == {"split": "ran", "train": "failed"}
     assert "--only left out 'verify', which is not up to date (inputs changed: src)" in out
 
+
+
+def test_only_dry_run_warns_when_a_selected_step_may_make_the_gate_stale(tmp_path):
+    cfg = make(tmp_path, GATED)
     run(cfg)
-    (tmp_path / "in.txt").write_text("changed again")
+    cfg.write_text(cfg.read_text().replace('outputs = { dst = "out/split.txt" }',
+                                           'outputs = { dst = "out/split.txt" }\nparams = { v = 1 }'))
     result, out = run(cfg, only=["split", "train"], dry_run=True)
-    assert statuses(result) == {"split": "would run", "train": "failed"}
-    assert "--only left out 'verify', which is not up to date (after split)" in out
+    assert statuses(result) == {"split": "would run", "train": "would run"}
+    assert "--only left out 'verify', which may go stale (after split): 'train' fails if it does" in out
+    assert "dry run complete with warnings" in out
+
+    result, _ = run(cfg, only=["split", "train"])  # same output, so 'verify' stays current
+    assert statuses(result) == {"split": "ran", "train": "cached"}
+
+
+def test_only_fails_a_step_whose_left_out_gate_fails_preflight(tmp_path):
+    cfg = make(tmp_path, GATED.replace('outputs = { report = "out/report.txt" }',
+                                       'outputs = { report = "out/report.txt" }\n'
+                                       'requires = ["packaging>=0"]'))
+    run(cfg)
+    cfg.write_text(cfg.read_text().replace("packaging>=0", "packaging<0"))
+    result, _ = run(cfg)
+    assert result.halted_by == "verify"
+    result, out = run(cfg, only=["train"], rerun=["train"])
+    assert statuses(result) == {"train": "failed"}
+    assert "--only left out 'verify', which is not up to date (preflight failed: " in out
 
 
 def test_only_runs_a_step_whose_left_out_gate_is_current(tmp_path):
