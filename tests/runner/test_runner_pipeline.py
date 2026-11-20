@@ -501,45 +501,68 @@ depends_on = ["verify"]
 """
 
 
-def test_only_warns_when_a_blocked_gate_is_left_out(tmp_path):
+def test_only_fails_a_step_whose_failed_gate_is_left_out(tmp_path):
     cfg = make(tmp_path, GATED)
     run(cfg)
     (tmp_path / "in.txt").write_text("bad")
     result, _ = run(cfg)
     assert result.halted_by == "verify"
+    model = (tmp_path / "out" / "model.txt").read_text()
 
     result, out = run(cfg, only=["train"])
-    assert result.ok
+    assert result.halted_by == "train" and statuses(result) == {"train": "failed"}
     assert "--only left out 'verify', which is not up to date (no checkpoint)" in out
-    assert "'train' depends on it" in out
-    assert "completed with warnings" in out
+    assert "select it too" in out
+    assert (tmp_path / "out" / "model.txt").read_text() == model
+
+    result, out = run(cfg, only=["train"], dry_run=True)
+    assert statuses(result) == {"train": "failed"}
+    assert "(no checkpoint)" in out and "halted at 'train'" in out
 
 
-def test_only_warns_when_a_selected_step_makes_the_gate_stale(tmp_path):
+def test_only_fails_a_step_reaching_a_failed_gate_through_another_step(tmp_path):
+    cfg = make(tmp_path, GATED + """
+[[steps]]
+name = "predict"
+function = "fns:count"
+inputs = { src = "out/model.txt" }
+outputs = { n = "out/pred.txt" }
+""")
+    run(cfg)
+    (tmp_path / "in.txt").write_text("bad")
+    run(cfg)
+    result, out = run(cfg, only=["predict"], rerun=["predict"])
+    assert statuses(result) == {"predict": "failed"}
+    assert "--only left out 'verify', which is not up to date (no checkpoint)" in out
+
+
+def test_only_skips_a_non_critical_step_whose_gate_is_left_out(tmp_path):
+    cfg = make(tmp_path, GATED.replace('depends_on = ["verify"]',
+                                       'depends_on = ["verify"]\ncritical = false'))
+    run(cfg)
+    (tmp_path / "out" / "report.txt").unlink()
+    result, out = run(cfg, only=["train"], rerun=["train"])
+    assert statuses(result) == {"train": "skipped"} and result.ok
+    assert "--only left out 'verify', which is not up to date" in out
+
+
+def test_only_fails_a_step_when_a_selected_step_makes_the_gate_stale(tmp_path):
     cfg = make(tmp_path, GATED)
     run(cfg)
     (tmp_path / "in.txt").write_text("changed")  # 'verify' is current until 'split' reruns
 
-    _, out = run(cfg, only=["split", "train"])
+    result, out = run(cfg, only=["split", "train"])
+    assert statuses(result) == {"split": "ran", "train": "failed"}
     assert "--only left out 'verify', which is not up to date (inputs changed: src)" in out
 
     run(cfg)
     (tmp_path / "in.txt").write_text("changed again")
     result, out = run(cfg, only=["split", "train"], dry_run=True)
+    assert statuses(result) == {"split": "would run", "train": "failed"}
     assert "--only left out 'verify', which is not up to date (after split)" in out
-    assert result.outcomes["split"].status == "would run"
-    assert "dry run complete with warnings" in out
 
 
-def test_only_warnings_are_counted_in_the_footer(tmp_path):
-    cfg = make(tmp_path, GATED)
-    run(cfg)
-    (tmp_path / "out" / "report.txt").unlink()
-    _, out = run(cfg, only=["train"])
-    assert "1 warning(s)" in out
-
-
-def test_only_is_quiet_when_left_out_steps_are_current(tmp_path):
+def test_only_runs_a_step_whose_left_out_gate_is_current(tmp_path):
     cfg = make(tmp_path, GATED)
     run(cfg)
     result, out = run(cfg, only=["train"], rerun=["train"])
@@ -547,18 +570,43 @@ def test_only_is_quiet_when_left_out_steps_are_current(tmp_path):
     assert not result.warnings and "left out" not in out
 
 
-def test_only_warns_once_per_left_out_step(tmp_path):
-    cfg = make(tmp_path, GATED + """
+UNGATED = """
+[[steps]]
+name = "split"
+function = "fns:copy"
+inputs = { src = "in.txt" }
+outputs = { dst = "out/split.txt" }
+
+[[steps]]
+name = "train"
+function = "fns:count"
+inputs = { src = "out/split.txt" }
+outputs = { n = "out/model.txt" }
+
 [[steps]]
 name = "evaluate"
 function = "fns:count"
-inputs = { src = "out/model.txt" }
+inputs = { src = "out/split.txt" }
 outputs = { n = "out/metrics.txt" }
-depends_on = ["verify"]
-""")
+"""
+
+
+def test_only_warns_when_a_left_out_input_step_is_stale(tmp_path):
+    cfg = make(tmp_path, UNGATED)
     run(cfg)
-    (tmp_path / "out" / "report.txt").unlink()
-    result, _ = run(cfg, only=["train", "evaluate"])
+    (tmp_path / "in.txt").write_text("changed")
+    result, out = run(cfg, only=["train"], rerun=["train"])
+    assert statuses(result) == {"train": "ran"}
+    assert "--only left out 'split', which is not up to date (inputs changed: src)" in out
+    assert "'train' depends on it" in out
+    assert "completed with warnings" in out and "1 warning(s)" in out
+
+
+def test_only_warns_once_per_left_out_step(tmp_path):
+    cfg = make(tmp_path, UNGATED)
+    run(cfg)
+    (tmp_path / "in.txt").write_text("changed")
+    result, _ = run(cfg, only=["train", "evaluate"], force=True)
     assert len(result.warnings) == 1
 
 
@@ -566,9 +614,9 @@ def test_a_short_step_name_inside_an_earlier_warning_is_still_warned_about(tmp_p
     cfg = make(tmp_path, """
 [[steps]]
 name = "gate_a"
-function = "fns:gate"
+function = "fns:copy"
 inputs = { src = "in.txt" }
-outputs = { report = "out/gate.txt" }
+outputs = { dst = "out/gate.txt" }
 
 [[steps]]
 name = "a"
@@ -579,9 +627,8 @@ outputs = { dst = "out/a.txt" }
 [[steps]]
 name = "train"
 function = "fns:count"
-inputs = { src = "out/a.txt" }
+inputs = { src = "out/a.txt", g = "out/gate.txt" }
 outputs = { n = "out/n.txt" }
-depends_on = ["gate_a"]
 """)
     run(cfg)
     (tmp_path / "in.txt").write_text("changed")

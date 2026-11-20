@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-r", "--rerun", action="append", default=[], metavar="STEP",
                     help="ignore the checkpoint of STEP (repeatable; a kept once step stays kept)")
     ap.add_argument("-o", "--only", nargs="+", metavar="STEP",
-                    help="run only these steps (their inputs must already exist)")
+                    help="run only these steps (inputs must exist, gates be up to date)")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="also show the captured output of successful steps")
     ap.add_argument("-F", "--follow", action="store_true",
