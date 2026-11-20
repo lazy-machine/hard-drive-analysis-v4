@@ -325,9 +325,8 @@ def test_dense_window_stops_at_split_bounds():
     T (test) fails 4 days after test_start, with panel history before it. R (train) fails
     on train_end. L (train) fails after train_end, so it has no dense window at all.
     """
-    split = STUDY["split"]
-    sql = _assert_sql("dense_window_complete", dense=30, test_start=split["test_start"],
-                      train_end=split["train_end"])
+    sql = _assert_sql("dense_window_complete", dense=30, test_start="2024-01-01",
+                      train_end="2023-12-31")
     con = duckdb.connect()
     con.sql("""CREATE TABLE cohort AS SELECT * FROM (VALUES
                ('T', 'test', 1.0, DATE '2024-01-05', DATE '2024-01-05'),
@@ -343,5 +342,12 @@ def test_dense_window_stops_at_split_bounds():
                WHERE (serial_number = 'T' AND date >= DATE '2024-01-01')
                   OR (serial_number = 'R' AND date > DATE '2023-12-01')""")
     assert con.sql(sql).fetchall() == []
-    con.sql("DELETE FROM snapshots WHERE serial_number = 'T' AND date = DATE '2024-01-01'")
-    assert [r[:2] for r in con.sql(sql).fetchall()] == [("T", date(2024, 1, 1))]
+
+    con.sql("UPDATE cohort SET drive_weight = NULL WHERE serial_number = 'T'")
+    assert {r[0] for r in con.sql(sql).fetchall()} == {"T"}
+    con.sql("UPDATE cohort SET drive_weight = 1.0 WHERE serial_number = 'T'")
+
+    con.sql("""DELETE FROM snapshots WHERE (serial_number, date) IN
+               (('T', DATE '2024-01-01'), ('R', DATE '2023-12-31'))""")
+    assert sorted(r[:2] for r in con.sql(sql).fetchall()) == [
+        ("R", date(2023, 12, 31)), ("T", date(2024, 1, 1))]
