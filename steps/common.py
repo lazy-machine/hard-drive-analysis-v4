@@ -104,6 +104,28 @@ def stable_bucket(serial: str) -> int:
     return int(stable_unit(serial, "split") * 100)
 
 
+# Day d is a stride day for a drive when (days from STRIDE_EPOCH to d + offset) % stride == 0.
+STRIDE_EPOCH = "2000-01-01"
+
+
+def stride_offset(serial: str, stride: int) -> int:
+    """Where the drive's stride schedule starts, so drives are not all sampled on one day."""
+    return int(stable_unit(serial, "stride") * stride)
+
+
+def on_stride(frame, stride: int):
+    """True for rows (serial_number, date) on their drive's stride days: the schedule
+    panel.snapshots samples every drive on. Near a failure it keeps every day; stride-day
+    rows are the ones a weekly check would have seen."""
+    import numpy as np
+    import pandas as pd
+
+    serials, codes = np.unique(frame["serial_number"].to_numpy(), return_inverse=True)
+    offset = np.array([stride_offset(s, stride) for s in serials], dtype=np.int64)
+    days = (pd.to_datetime(frame["date"]) - pd.Timestamp(STRIDE_EPOCH)).dt.days.to_numpy()
+    return (days + offset[codes]) % stride == 0
+
+
 def left_truncated(first_date):
     """1 for drives whose first row is the cohort's first panel day: they were already in
     service when the panel starts, so days_in_service understates their age."""

@@ -226,6 +226,19 @@ def calibrate(booster, kind, meta_va, X_va, study, log, fallback=None) -> tuple[
     return coefs, notes
 
 
+def _params(p: dict, requested: str, used: str) -> tuple[dict, dict]:
+    """LightGBM params to train with, and the ones to store in the metadata.
+
+    The thread count and the memory fallback depend on the machine, so the stored ones
+    leave out the threads and keep the requested histogram mode: same inputs, same file.
+    """
+    def merged(histogram: str) -> dict:
+        return {**BASE_PARAMS, **HISTOGRAM[histogram], **p["lgbm"], "seed": p["seed"]}
+
+    stored = {k: v for k, v in merged(requested).items() if k != "num_threads"}
+    return {**merged(used), "num_threads": int(os.environ.get("HDA_THREADS", 0))}, stored
+
+
 def _subset(meta, X, keep):
     return meta[keep].reset_index(drop=True), X[keep]
 
@@ -249,18 +262,17 @@ def train(ctx):
     if min(m["event"].sum() for m in (meta_tr, meta_va, meta_cal)) == 0:
         raise ValueError("train and both validation parts need at least one failure each")
 
-    histogram = p.get("histogram", "col")
-    if histogram not in HISTOGRAM:
-        raise ValueError(f"histogram must be one of {sorted(HISTOGRAM)}, got '{histogram}'")
+    requested = p.get("histogram", "col")
+    if requested not in HISTOGRAM:
+        raise ValueError(f"histogram must be one of {sorted(HISTOGRAM)}, got '{requested}'")
     n_bins = len(study["label"]["bin_edges"]) - 1 if p["kind"] == "hazard" else 1
     histogram = _check_memory((len(meta_tr) + len(meta_va)) * n_bins, len(features),
-                              X_tr.nbytes + X_va.nbytes + X_cal.nbytes, log, histogram)
+                              X_tr.nbytes + X_va.nbytes + X_cal.nbytes, log, requested)
     names = features + (["bin_start"] if p["kind"] == "hazard" else [])
     power = p.get("weight_power", 1.0)
     data_tr, y_tr, w_tr, _ = _rows(p["kind"], meta_tr, X_tr, study)
     data_va, y_va, w_va, _ = _rows(p["kind"], meta_va, X_va, study)
-    params = {**BASE_PARAMS, **HISTOGRAM[histogram], **p["lgbm"], "seed": p["seed"],
-              "num_threads": int(os.environ.get("HDA_THREADS", 0))}
+    params, stored = _params(p, requested, histogram)
     # The datasets get the training params (lgb.train would set them before binning;
     # min_child_samples, for one, decides which features are kept).
     train_ds = lgb.Dataset(data_tr, label=y_tr, weight=w_tr ** power, feature_name=names,
@@ -312,13 +324,13 @@ def train(ctx):
         "include": list(p.get("include", ())), "exclude": list(p.get("exclude", ())),
         "bin_edges": study["label"]["bin_edges"],
         "binary_horizon": study["label"]["binary_horizon"],
-        "params": params, "weight_power": power, "calibration": calibration, **extra,
+        "params": stored, "weight_power": power, "calibration": calibration, **extra,
         "calibration_snapshots": int(len(meta_cal)), "calibration_notes": notes,
         "best_iteration": best, "val_logloss": val_loss, **stats,
         "importance_gain": {n: float(g) for n, g in sorted(
             zip(names, gain, strict=True), key=lambda t: -t[1])},
     })
-    return {"best_iter": best, "val_logloss": val_loss, **stats}
+    return {"best_iter": best, "val_logloss": val_loss, "histogram": histogram, **stats}
 
 
 def load_booster(model_path, meta_path) -> tuple[lgb.Booster, dict]:

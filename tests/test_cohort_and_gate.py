@@ -6,7 +6,7 @@ import duckdb
 import pandas as pd
 import pytest
 
-from common import load_sample, load_study, stable_bucket, stable_unit
+from common import load_sample, load_study, stable_bucket, stable_unit, stride_offset
 from drives import select_cohort
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,11 +22,12 @@ def drives_frame(rows):
 
 
 def test_stable_hashes_are_stable():
-    # fixed values: a change here would silently reshuffle every split and sample
-    assert stable_bucket("Z305B2QN") == stable_bucket("Z305B2QN")
-    assert [stable_bucket(s) for s in ("A", "B", "C")] == [
-        int(stable_unit(s, "split") * 100) for s in ("A", "B", "C")]
-    assert stable_unit("A", "split") != stable_unit("A", "sample")
+    # fixed values: a change here would silently reshuffle every split, sample and schedule
+    serials = ("Z305B2QN", "ZA1FLE1P", "A", "B", "C")
+    assert [stable_bucket(s) for s in serials] == [1, 32, 49, 94, 59]
+    assert [stride_offset(s, 7) for s in serials] == [6, 5, 6, 0, 0]
+    assert [round(stable_unit(s, "sample"), 6) for s in serials] == [
+        0.701468, 0.375672, 0.601464, 0.829172, 0.52053]
 
 
 def test_cohort_rules():
@@ -164,6 +165,20 @@ def test_gate_warns_on_cohort_drive_without_snapshots(pipeline_run, tmp_path):
     missing = before.get("details", {}).get("violations", 0)
     assert after["details"]["violations"] == missing + 1
 
+
+
+def test_gate_counts_all_null_features_as_sparse(pipeline_run, tmp_path):
+    """Features with no value at all in train are the sparsest, not exempt."""
+    import json
+
+    project, _ = pipeline_run
+    features = json.loads((project / "build" / "feature-schema.json").read_text())["features"]
+    nulled = sorted(features[-(len(features) // 4 + 1):])
+    sets = ", ".join(f'"{f}" = NULL' for f in nulled)
+    name = "custom.few_sparse_features"
+    check = _checks(project, tmp_path, f"UPDATE snap SET {sets} WHERE split = 'train'")[name]
+    assert check["status"] == "fail" and check["severity"] == "warn"
+    assert set(nulled) <= set(check["details"]["sparse"])
 
 
 def _gate_on(project, tmp_path, snapshots_sql=None, cohort_sql=None):

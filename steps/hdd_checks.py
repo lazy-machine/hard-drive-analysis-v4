@@ -8,16 +8,16 @@ use the same helpers as the steps that built the data, so they cannot drift from
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 
-from common import stable_bucket, stable_unit
+from common import on_stride, stable_bucket
 from drives import assign_split
 
 
 def stride_rows_on_stride_days(v):
     """Rows weighted drive_weight * stride fall on the drive's stride days.
 
-    The schedule starts at the same per-drive offset as panel._register_cohort.
+    common.on_stride is the schedule's definition; this checks the snapshot step's SQL
+    against it, so it shares the definition rather than keeping a copy.
     """
     stride = int(v.var("stride"))
     if stride == 1:
@@ -26,14 +26,11 @@ def stride_rows_on_stride_days(v):
               category="weights")
         return
     cohort = v.dataset("cohort")[["serial_number", "drive_weight"]]
-    offsets = {s: int(stable_unit(s, "stride") * stride) for s in cohort["serial_number"]}
     bad = 0
     for d in v.splits.values():
         m = d[["serial_number", "date", "weight"]].merge(cohort, on="serial_number", how="left")
-        on_stride = np.abs(m["weight"] - m["drive_weight"] * stride) < 1e-6
-        days = (pd.to_datetime(m["date"]) - pd.Timestamp("2000-01-01")).dt.days
-        off = m["serial_number"].map(offsets)
-        bad += int((on_stride & ((days + off) % stride != 0)).sum())
+        stride_weight = np.abs(m["weight"] - m["drive_weight"] * stride) < 1e-6
+        bad += int((stride_weight & ~on_stride(m, stride)).sum())
     v.add("stride_rows_on_stride_days", bad == 0,
           f"{bad} rows with weight drive_weight * {stride} off the drive's stride day",
           category="weights", details={"rows": bad},
@@ -68,7 +65,7 @@ def few_sparse_features(v):
     """At most a quarter of the features are less than 1% filled in train."""
     train = v.train
     fill = train[v.features].notna().mean()
-    sparse = sorted(fill[(fill > 0) & (fill < 0.01)].index)
+    sparse = sorted(fill[fill < 0.01].index)
     v.add("few_sparse_features", len(sparse) <= len(v.features) // 4,
           f"{len(sparse)} feature(s) < 1% filled in train: {sparse}", severity="warn",
           category="features", details={"sparse": sparse})
