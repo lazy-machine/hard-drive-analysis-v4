@@ -1,12 +1,14 @@
 """Cohort selection rules, contract validation, and the gate catching injected bugs."""
 
+from datetime import date
 from pathlib import Path
 
 import duckdb
 import pandas as pd
 import pytest
 
-from common import load_sample, load_study, stable_bucket, stable_unit, stride_offset
+from common import (load_sample, load_study, on_stride, stable_bucket, stable_unit,
+                    stride_offset)
 from drives import select_cohort
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -223,3 +225,128 @@ def test_gate_catches_cohort_drive_in_wrong_split(pipeline_run, tmp_path):
                           ELSE split END AS split)
         FROM cohort""")
     assert "custom.cohort_split_matches_stable_bucket" in blocking
+
+
+def _dense_rows(project):
+    """Snapshot rows at the dense weight, with whether they fall on the drive's stride day."""
+    build = project / "build"
+    stride = load_sample(project / "config" / "sample.toml")["stride_days"]
+    rows = duckdb.sql(f"""SELECT s.serial_number, s.date
+                          FROM read_parquet('{build}/snapshots.parquet') s
+                          JOIN read_parquet('{build}/cohort.parquet') c USING (serial_number)
+                          WHERE abs(s.weight - c.drive_weight) < 1e-6
+                          ORDER BY s.serial_number, s.date""").df()
+    return rows.assign(on_stride=on_stride(rows, stride)), stride
+
+
+def test_gate_catches_stride_weight_in_dense_window(pipeline_run, tmp_path):
+    """A dense-window row on a stride day weighted as a stride row: a valid weight, wrong place."""
+    project, _ = pipeline_run
+    rows, stride = _dense_rows(project)
+    serial, day = rows.loc[rows["on_stride"], ["serial_number", "date"]].iloc[0]
+    failed = _gate(project, tmp_path, f"""UPDATE snap SET weight = weight * {stride}
+                               WHERE serial_number = '{serial}' AND date = DATE '{day:%Y-%m-%d}'""")
+    assert "assert.dense_window_complete" in failed
+    assert not failed & {"assert.snapshot_weights_valid", "custom.stride_rows_on_stride_days",
+                         "assert.dense_rows_before_visible_failure"}
+
+
+def test_gate_catches_deleted_dense_rows(pipeline_run, tmp_path):
+    project, _ = pipeline_run
+    rows, _ = _dense_rows(project)
+    serial = rows["serial_number"].iloc[0]
+    failed = _gate(project, tmp_path, f"""DELETE FROM snap USING cohort c
+                               WHERE snap.serial_number = c.serial_number
+                                 AND snap.serial_number = '{serial}'
+                                 AND abs(snap.weight - c.drive_weight) < 1e-6""")
+    assert "assert.dense_window_complete" in failed
+
+
+def test_gate_catches_null_cohort_weight(pipeline_run, tmp_path):
+    project, _ = pipeline_run
+    blocking = _gate_on(project, tmp_path, cohort_sql="""
+        SELECT * REPLACE (CASE WHEN serial_number = (SELECT min(serial_number) FROM cohort)
+                          THEN NULL ELSE drive_weight END AS drive_weight)
+        FROM cohort""")
+    assert "assert.cohort_weights_match_sampling" in blocking
+
+
+FIRST_FAILING = "SELECT min(serial_number) FROM cohort WHERE failure_date IS NOT NULL"
+
+
+def test_gate_catches_wrong_stratum(pipeline_run, tmp_path):
+    """A failing drive sampled as healthy, its weight consistent with the wrong stratum."""
+    project, _ = pipeline_run
+    sample = load_sample(project / "config" / "sample.toml")
+    ratio = sample["failing_fraction"] / sample["healthy_fraction"]
+    first = f"""(SELECT min(serial_number) FROM read_parquet('{project}/build/cohort.parquet')
+                 WHERE failure_date IS NOT NULL)"""
+    blocking = _gate_on(
+        project, tmp_path,
+        cohort_sql=f"""
+            SELECT * REPLACE (
+                CASE WHEN serial_number = {first} THEN 'healthy' ELSE stratum END AS stratum,
+                CASE WHEN serial_number = {first} THEN drive_weight * {ratio}
+                     ELSE drive_weight END AS drive_weight)
+            FROM cohort""",
+        snapshots_sql=f"""
+            SELECT * REPLACE (CASE WHEN serial_number = {first} THEN weight * {ratio}
+                              ELSE weight END AS weight)
+            FROM snapshots""")
+    assert "custom.cohort_stratum_matches_rule" in blocking
+    assert not blocking & {"assert.cohort_weights_match_sampling", "assert.snapshot_weights_valid",
+                           "assert.dense_window_complete"}
+
+
+@pytest.mark.parametrize("column", ["first_date", "last_date", "failure_date"])
+def test_gate_catches_cohort_dates_off_drive_index(pipeline_run, tmp_path, column):
+    project, _ = pipeline_run
+    blocking = _gate_on(project, tmp_path, cohort_sql=f"""
+        SELECT * REPLACE (CASE WHEN serial_number = ({FIRST_FAILING}) THEN {column} + 1
+                          ELSE {column} END AS {column})
+        FROM cohort""")
+    assert "assert.cohort_dates_match_drives" in blocking
+
+
+def _assert_sql(name: str, **values) -> str:
+    import re
+    import tomllib
+
+    step = next(s for s in tomllib.loads((ROOT / "pipeline.toml").read_text())["steps"]
+                if s["name"] == "verify")
+    sql = next(a["sql"] for a in step["params"]["assert"] if a["name"] == name)
+    return re.sub(r"\$\{(\w+)\}", lambda m: str(values[m[1]]), sql)
+
+
+def test_dense_window_stops_at_split_bounds():
+    """Dense windows that cross test_start or train_end: only in-split days are required.
+
+    T (test) fails 4 days after test_start, with panel history before it. R (train) fails
+    on train_end. L (train) fails after train_end, so it has no dense window at all.
+    """
+    sql = _assert_sql("dense_window_complete", dense=30, test_start="2024-01-01",
+                      train_end="2023-12-31")
+    con = duckdb.connect()
+    con.sql("""CREATE TABLE cohort AS SELECT * FROM (VALUES
+               ('T', 'test', 1.0, DATE '2024-01-05', DATE '2024-01-05'),
+               ('R', 'train', 1.0, DATE '2023-12-31', DATE '2024-06-01'),
+               ('L', 'train', 1.0, DATE '2024-01-05', DATE '2024-02-01'))
+               c(serial_number, split, drive_weight, failure_date, last_date)""")
+    con.sql("""CREATE TABLE panel AS
+               SELECT serial_number, CAST(d AS DATE) AS date FROM cohort,
+                      range(failure_date - INTERVAL 40 DAY, least(failure_date,
+                            CASE split WHEN 'test' THEN failure_date ELSE DATE '2023-12-31' END)
+                            + INTERVAL 1 DAY, INTERVAL 1 DAY) t(d)""")
+    con.sql("""CREATE TABLE snapshots AS SELECT serial_number, date, 1.0 AS weight FROM panel
+               WHERE (serial_number = 'T' AND date >= DATE '2024-01-01')
+                  OR (serial_number = 'R' AND date > DATE '2023-12-01')""")
+    assert con.sql(sql).fetchall() == []
+
+    con.sql("UPDATE cohort SET drive_weight = NULL WHERE serial_number = 'T'")
+    assert {r[0] for r in con.sql(sql).fetchall()} == {"T"}
+    con.sql("UPDATE cohort SET drive_weight = 1.0 WHERE serial_number = 'T'")
+
+    con.sql("""DELETE FROM snapshots WHERE (serial_number, date) IN
+               (('T', DATE '2024-01-01'), ('R', DATE '2023-12-31'))""")
+    assert sorted(r[:2] for r in con.sql(sql).fetchall()) == [
+        ("R", date(2023, 12, 31)), ("T", date(2024, 1, 1))]

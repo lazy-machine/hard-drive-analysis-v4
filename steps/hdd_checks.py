@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from common import on_stride, stable_bucket
-from drives import assign_split
+from drives import assign_split, stratum
 
 
 def stride_rows_on_stride_days(v):
@@ -51,6 +51,20 @@ def cohort_split_matches_stable_bucket(v):
           f"{len(wrong)} of {len(cohort)} cohort drives in the wrong split", category="split",
           details={"drives": len(wrong), "examples": sorted(wrong)[:5]},
           hint="The cohort step and the split rule in config/study.toml disagree.")
+
+
+def cohort_stratum_matches_rule(v):
+    """Every cohort drive's stratum is what drives.stratum gives, so its weight follows.
+
+    cohort_weights_match_sampling checks drive_weight against stratum; this pins stratum
+    to the drive's failure date, with the rule the cohort step uses.
+    """
+    cohort = v.dataset("cohort")
+    wrong = cohort.loc[cohort["stratum"].to_numpy() != stratum(cohort), "serial_number"]
+    v.add("cohort_stratum_matches_rule", wrong.empty,
+          f"{len(wrong)} of {len(cohort)} cohort drives in the wrong sampling stratum",
+          category="weights", details={"drives": len(wrong), "examples": sorted(wrong)[:5]},
+          hint="The cohort step wrote a stratum that drives.stratum does not give.")
 
 
 def features_are_float(v):

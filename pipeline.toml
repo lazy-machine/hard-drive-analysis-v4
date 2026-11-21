@@ -90,7 +90,7 @@ watch = ["steps/common.py"]
 name = "verify"
 description = "Pre-training gate (data-verify): split, temporal, label, weight, schema and leakage checks"
 function = "data_verify:verify"
-inputs = { snapshots = "build/snapshots.parquet", cohort = "build/cohort.parquet", schema = "build/feature-schema.json", study = "config/study.toml", sample = "config/sample.toml" }
+inputs = { snapshots = "build/snapshots.parquet", cohort = "build/cohort.parquet", drives = "build/drives.parquet", panel = "build/panel", schema = "build/feature-schema.json", study = "config/study.toml", sample = "config/sample.toml" }
 outputs = { report = "build/verify-report.json", summary = "build/verify-report.md" }
 requires = ["duckdb>=2.0", "numpy", "pandas>=2.2", "pyarrow"]
 watch = ["steps/hdd_checks.py", "steps/common.py", "steps/drives.py"]
@@ -127,7 +127,8 @@ fitted_levels = [{ name = "model_code", levels = { from = "schema", key = "categ
 
 # Python checks in steps/hdd_checks.py
 custom = ["hdd_checks:stride_rows_on_stride_days", "hdd_checks:cohort_split_matches_stable_bucket",
-          "hdd_checks:features_are_float", "hdd_checks:few_sparse_features"]
+          "hdd_checks:cohort_stratum_matches_rule", "hdd_checks:features_are_float",
+          "hdd_checks:few_sparse_features"]
 
 [steps.params.schema]
 columns = ["serial_number", "date", "split", "duration_days", "event", "weight", { from = "schema", key = "features" }]
@@ -140,6 +141,7 @@ ranges = { duration_days = [0, inf], weight = [0, inf] }
 
 [steps.params.vars]
 train_end = { from = "study", key = "split.train_end" }
+test_start = { from = "study", key = "split.test_start" }
 horizon = { from = "study", key = "label.binary_horizon" }
 min_failing = { from = "study", key = "evaluation.min_failing_drives" }
 failing_fraction = { from = "sample", key = "scales.{scale}.failing_fraction" }
@@ -174,8 +176,20 @@ sql = """SELECT s.serial_number, s.split, c.split AS cohort_split FROM snapshots
 name = "cohort_weights_match_sampling"
 category = "weights"
 sql = """SELECT serial_number, stratum, drive_weight FROM cohort
-         WHERE abs(drive_weight - CASE stratum WHEN 'failing' THEN 1 / ${failing_fraction}
+         WHERE drive_weight IS NULL
+            OR abs(drive_weight - CASE stratum WHEN 'failing' THEN 1 / ${failing_fraction}
                                                ELSE 1 / ${healthy_fraction} END) > 1e-9"""
+
+[[steps.params.assert]]
+name = "cohort_dates_match_drives"
+category = "labels"
+description = "The cohort's dates, which the label asserts start from, are drive_index's"
+sql = """SELECT c.serial_number, c.first_date, c.last_date, c.failure_date,
+                d.first_date AS drives_first_date, d.last_date AS drives_last_date, d.first_failure
+         FROM cohort c LEFT JOIN drives d USING (serial_number)
+         WHERE d.serial_number IS NULL OR c.first_date IS DISTINCT FROM d.first_date
+            OR c.last_date IS DISTINCT FROM d.last_date
+            OR c.failure_date IS DISTINCT FROM d.first_failure"""
 
 [[steps.params.assert]]
 name = "one_model_per_drive"
@@ -236,6 +250,22 @@ sql = """SELECT s.serial_number, s.date FROM snapshots s JOIN cohort c USING (se
                AND date_diff('day', s.date, c.failure_date) < ${dense}
                AND c.failure_date <= CASE WHEN s.split = 'test' THEN c.last_date
                    ELSE least(c.last_date, DATE '${train_end}') END, false)"""
+
+[[steps.params.assert]]
+name = "dense_window_complete"
+category = "weights"
+description = "Every extracted day in the dense window before a visible failure is a snapshot weighing drive_weight"
+sql = """WITH w AS (
+           SELECT p.serial_number, p.date, c.drive_weight FROM panel p JOIN cohort c USING (serial_number)
+           WHERE c.failure_date IS NOT NULL AND date_diff('day', p.date, c.failure_date) < ${dense}
+             AND CASE WHEN c.split = 'test'
+                      THEN p.date >= DATE '${test_start}' AND c.failure_date <= c.last_date
+                      ELSE p.date <= DATE '${train_end}'
+                           AND c.failure_date <= least(c.last_date, DATE '${train_end}') END)
+         SELECT w.serial_number, w.date, w.drive_weight, s.weight FROM w
+         LEFT JOIN snapshots s USING (serial_number, date)
+         WHERE s.weight IS NULL OR w.drive_weight IS NULL
+            OR abs(s.weight - w.drive_weight) >= 1e-6"""
 
 [[steps.params.assert]]
 name = "cohort_drives_have_snapshots"
