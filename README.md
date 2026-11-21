@@ -116,11 +116,12 @@ sha=$(sha256sum dataset/dataset.parquet | cut -d' ' -f1) && [[ $sha =~ ^[0-9a-f]
 
 ### 5. Run
 
-The committed scale is `small`: a quick check that everything works, not the results. For
-real results switch to `full` first (see [Scales](#scales)):
+The committed scale is `full`, which gives the results and needs a 32 GB machine. For a
+quick check that everything works, or on a 16 GB machine, switch to `small` first (see
+[Scales](#scales)):
 
 ```bash
-sed -i 's/^scale = "small"/scale = "full"/' config/sample.toml
+sed -i 's/^scale = "full"/scale = "small"/' config/sample.toml
 ```
 
 Then:
@@ -149,7 +150,7 @@ again at the interrupted one. To keep a run going after logout, start it with
 ## Scales
 
 The scale decides how many drives a run uses. Set `scale` in `config/sample.toml`. It is
-committed as `small`; use `full` for real results.
+committed as `full`, which gives the results; `small` is a quick check.
 
 | Scale | Drives kept (failing / healthy) | Time after `drive_index` | Memory |
 |---|---|---|---|
