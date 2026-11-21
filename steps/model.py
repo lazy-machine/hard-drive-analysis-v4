@@ -31,6 +31,7 @@ import gc
 import json
 import os
 import platform
+import re
 from pathlib import Path
 
 import lightgbm as lgb
@@ -239,6 +240,21 @@ def _params(p: dict, requested: str, used: str) -> tuple[dict, dict]:
     return {**merged(used), "num_threads": int(os.environ.get("HDA_THREADS", 0))}, stored
 
 
+PARAMETERS_BLOCK = re.compile(r"\nparameters:\n.*?\nend of parameters\n", re.S)
+
+
+def model_text(booster: lgb.Booster, num_iteration: int) -> str:
+    """The model file without LightGBM's parameter block.
+
+    That block records num_threads and the histogram fallback, so it would change the
+    file, and rerun everything after it, for the same inputs. Loading does not need it.
+    """
+    text, n = PARAMETERS_BLOCK.subn("\n", booster.model_to_string(num_iteration=num_iteration))
+    if n != 1:
+        raise ValueError(f"expected one parameters block in the LightGBM model text, found {n}")
+    return text
+
+
 def _subset(meta, X, keep):
     return meta[keep].reset_index(drop=True), X[keep]
 
@@ -301,7 +317,7 @@ def train(ctx):
     val_loss = history["val"]["binary_logloss"][best - 1]
     log(f"best iteration {best}, val logloss {val_loss:.6g}")
 
-    booster.save_model(str(ctx.outputs["model"]), num_iteration=best)
+    ctx.outputs["model"].write_text(model_text(booster, best))
     booster = lgb.Booster(model_file=str(ctx.outputs["model"]))  # exactly what predict sees
     calibration, notes = calibrate(booster, p["kind"], meta_cal, X_cal, study, log)
     log(f"calibration (a, b) per bin: {[[round(a, 3), round(b, 3)] for a, b in calibration]}")
