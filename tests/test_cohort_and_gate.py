@@ -7,7 +7,8 @@ import duckdb
 import pandas as pd
 import pytest
 
-from common import load_sample, load_study, stable_bucket, stable_unit, stride_offset
+from common import (load_sample, load_study, on_stride, stable_bucket, stable_unit,
+                    stride_offset)
 from drives import select_cohort
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -235,9 +236,7 @@ def _dense_rows(project):
                           JOIN read_parquet('{build}/cohort.parquet') c USING (serial_number)
                           WHERE abs(s.weight - c.drive_weight) < 1e-6
                           ORDER BY s.serial_number, s.date""").df()
-    days = (pd.to_datetime(rows["date"]) - pd.Timestamp("2000-01-01")).dt.days
-    off = rows["serial_number"].map(lambda s: int(stable_unit(s, "stride") * stride))
-    return rows.assign(on_stride=(days + off) % stride == 0), stride
+    return rows.assign(on_stride=on_stride(rows, stride)), stride
 
 
 def test_gate_catches_stride_weight_in_dense_window(pipeline_run, tmp_path):
