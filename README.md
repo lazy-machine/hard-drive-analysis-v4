@@ -20,6 +20,10 @@ perfect.
 | 30 days | 0.877 | 0.603 |
 | 365 days | 0.787 | 0.585 |
 
+The positives include the snapshot taken on the failure day itself, so the 7-day number
+partly measures whether a drive is failing that day. `analysis.md`, "Where the signal comes
+from", gives the AUC on positives at least 7 days before the failure (30 days and longer).
+
 - SMART carries real failure signal, strongest close to the failure.
 - Failures are rare (about 0.1% of drive-days fail within 30 days), so most alerts are still
   false alarms. With the alert threshold set on validation drives to flag 1% of healthy

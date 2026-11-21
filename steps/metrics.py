@@ -262,6 +262,23 @@ def uno_concordance(risk, duration, event, w, tau: int, G=None) -> float:
     return concordance(risk, duration, event, w, event_weight=ew)
 
 
+def weighted_median(x: np.ndarray, w: np.ndarray) -> float:
+    """Smallest x with at least half the weight at or below it; the mean of the two middle
+    values when the weight splits exactly in half, so equal weights give np.median.
+    Zero-weight rows are ignored; nan if no weight is left."""
+    x, w = np.asarray(x, dtype=float), np.asarray(w, dtype=float)
+    x, w = x[w > 0], w[w > 0]
+    if x.size == 0:
+        return float("nan")
+    order = np.argsort(x, kind="stable")
+    x, cw = x[order], np.cumsum(w[order])
+    half, tol = cw[-1] / 2, cw[-1] * 1e-12   # tol absorbs cumsum rounding
+    k = int(np.searchsorted(cw, half - tol))
+    if k + 1 < x.size and cw[k] <= half + tol:
+        return float((x[k] + x[k + 1]) / 2)
+    return float(x[k])
+
+
 def weighted_quantile_threshold(score: np.ndarray, w: np.ndarray, rate: float) -> float:
     """Smallest threshold t such that the weighted share of score >= t is at most `rate`."""
     order = _desc_order(score)

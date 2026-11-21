@@ -9,7 +9,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from metrics import (
     bootstrap_counts, bootstrap_drive_counts, censoring_survival, concordance, ipcw_weights,
     km_failure, one_per_drive, uno_concordance, weighted_auc, weighted_average_precision,
-    weighted_quantile_threshold,
+    weighted_median, weighted_quantile_threshold,
 )
 
 
@@ -257,3 +257,36 @@ def test_parallel_rounds_keeps_order_and_handles_zero_rounds():
 
     assert evaluate.parallel_rounds(lambda i: i * i, 0) == []
     assert evaluate.parallel_rounds(lambda i: i * i, 7) == [i * i for i in range(7)]
+
+
+def test_weighted_median():
+    x = np.array([1.0, 2.0, 100.0])
+    assert weighted_median(x, np.array([1.0, 1.0, 10.0])) == 100.0
+    assert weighted_median(x, np.ones(3)) == np.median(x)
+    assert weighted_median(np.array([4.0, 1.0, 3.0, 2.0]), np.ones(4)) == 2.5
+    assert weighted_median(np.array([5.0, np.inf, np.inf]), np.ones(3)) == np.inf
+    # sampling weights 1 / 0.03 split exactly in half despite cumsum rounding
+    assert weighted_median(np.array([2.0] * 3 + [100.0] * 3), np.full(6, 1 / 0.03)) == 51.0
+    assert weighted_median(x, np.array([1.0, 0.0, 1.0])) == 50.5
+    assert np.isnan(weighted_median(x, np.zeros(3)))
+
+
+def test_life_table_weights_the_median_and_keeps_coverage_unrounded():
+    import pandas as pd
+
+    from evaluate import life
+
+    # four failing snapshots in the 0-6 bin and one healthy one
+    test = pd.DataFrame({
+        "duration_days": [3, 5, 6, 4, 100], "event": [1, 1, 1, 1, 0],
+        "weight": [1.0, 1.0, 10.0, 1.0, 1.0],
+        "m__median_days": [1.0, 2.0, 100.0, 3.0, np.inf],
+        "m__q10_days": [3.4, 1.0, 1.0, 1.0, np.inf],    # d=3 is below q10 = 3.4
+        "m__q90_days": [10.0, 6.0, 5.6, 4.0, np.inf],   # d=6 above q90, d=4 at q90
+        "m__rmst_days": [5.0, 5.0, 5.0, 5.0, 14.0],
+    })
+    summary, table = life(test, {"m": {"kind": "hazard"}}, [0, 7, 14])
+    (row,) = table.to_dict("records")
+    assert row["median_of_predicted_median"] == 100.0
+    assert np.isclose(row["coverage_q10_q90"], 1 / 13)
+    assert np.isclose(summary[0]["interval_q10_q90_coverage"], 1 / 13)

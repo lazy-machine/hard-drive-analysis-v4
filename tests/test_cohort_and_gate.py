@@ -68,6 +68,12 @@ def test_contract_validation(tmp_path):
     (tmp_path / "study.toml").write_text(bad)
     with pytest.raises(ValueError, match="not bin edges"):
         load_study(tmp_path / "study.toml")
+    # 14 is a bin edge but not a horizon: evaluate would find no hazard p14 column
+    bad = (ROOT / "config" / "study.toml").read_text().replace(
+        "binary_horizon = 30", "binary_horizon = 14")
+    (tmp_path / "study.toml").write_text(bad)
+    with pytest.raises(ValueError, match="not in label.horizons"):
+        load_study(tmp_path / "study.toml")
     (tmp_path / "sample.toml").write_text('scale = "nope"\n[scales.small]\n')
     with pytest.raises(ValueError, match="not defined"):
         load_sample(tmp_path / "sample.toml")

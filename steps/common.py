@@ -48,9 +48,13 @@ def load_study(path: Path) -> dict[str, Any]:
     edges = label["bin_edges"]
     if edges[0] != 0 or edges != sorted(set(edges)):
         raise ValueError(f"label.bin_edges must start at 0 and increase, got {edges}")
-    missing = [h for h in label["horizons"] + [label["binary_horizon"]] if h not in edges]
+    missing = [h for h in label["horizons"] if h not in edges]
     if missing:
         raise ValueError(f"horizons {missing} are not bin edges {edges}")
+    if label["binary_horizon"] not in label["horizons"]:
+        # evaluate reads the hazard models' p<binary_horizon>, written only for horizons
+        raise ValueError(f"label.binary_horizon {label['binary_horizon']} is not in "
+                         f"label.horizons {label['horizons']}")
     return study
 
 
