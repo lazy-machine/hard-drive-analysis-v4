@@ -29,6 +29,9 @@ CI (`.github/workflows/test.yml`) runs lint and tests on every push and pull req
 ## Code rules
 - Never load the panel into pandas. Whole-panel work is DuckDB, in month chunks.
 - A step reads only its declared `inputs` and `params` and writes only its `outputs`.
+  Two exceptions, neither read by another step nor checkpointed: progress logs in
+  `build/logs/<step>.log` (`common.Progress`) and scratch in `build/tmp/<step>/` (DuckDB
+  spill and staging, `common.connect`).
 - Outputs are deterministic (sorted, seeded, no timestamps), so caching stays correct.
 - A rule two steps share goes in `config/study.toml`.
 - Data reaches a model only through the gate (`depends_on = ["verify"]`). A test for a

@@ -55,7 +55,7 @@ import numpy as np
 import pandas as pd
 
 from common import (
-    Progress, left_truncated, load_sample, load_study, stable_unit, val_roles, write_json,
+    Progress, left_truncated, load_sample, load_study, on_stride, val_roles, write_json,
 )
 from metrics import (
     DriveCells, RankedScores, bootstrap_drive_counts, censoring_survival, concordance,
@@ -598,16 +598,6 @@ def alerting(val, test, D, models, horizon, rates, main_rate, lead, edges, round
                                    "lo": lo, "snapshots": int(m.sum()),
                                    "alerted": float(np.sum(D.w[m] * alert[m]) / np.sum(D.w[m]))})
     return summary, pd.DataFrame(curves)
-
-
-def on_stride(frame: pd.DataFrame, stride: int) -> np.ndarray:
-    """Rows on their drive's stride days: the weekly schedule every drive is sampled on
-    (panel._register_cohort's offsets). Near a failure the snapshot step keeps every
-    day; these rows are the ones a weekly check would have seen."""
-    serials, codes = np.unique(frame["serial_number"].to_numpy(), return_inverse=True)
-    offset = np.array([int(stable_unit(s, "stride") * stride) for s in serials])
-    days = (pd.to_datetime(frame["date"]) - pd.Timestamp("2000-01-01")).dt.days.to_numpy()
-    return (days + offset[codes]) % stride == 0
 
 
 def weekly_alerts(val, test, D, models, horizon, rates, stride, targets, rounds, seed,

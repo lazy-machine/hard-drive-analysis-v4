@@ -1,11 +1,15 @@
 """Report helpers and the single-feature signal table."""
 
+import json
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from explore import feature_signal
 from report import (
-    _drift_sentence, _label, _main_alert, _timing_verdict, est, side, table, top_importance,
+    _drift_sentence, report, _label, _main_alert, _timing_verdict, est, side, table, top_importance,
 )
 
 
@@ -125,3 +129,17 @@ def test_timing_verdict_uses_the_given_tolerance():
     # quantiles with fewer than 30 snapshots do not count
     few = {q: {**c, "snapshots": 10} for q, c in qc(0.8).items()}
     assert _timing_verdict(few, tolerance=0.15).startswith("Too few snapshots")
+
+
+def test_report_names_the_missing_reference_meta(tmp_path):
+    # evaluate's reference changed to a model whose metadata report does not declare
+    metrics = tmp_path / "metrics.json"
+    metrics.write_text(json.dumps({"reference": "hazard_nosmart"}))
+    ctx = SimpleNamespace(
+        inputs={"metrics": metrics, "meta_hazard_smart": tmp_path / "hazard_smart.json"},
+        outputs={"dir": tmp_path / "report"}, params={})
+    (tmp_path / "report").mkdir()
+    (tmp_path / "report" / "results.md").write_text("previous run\n")
+    with pytest.raises(ValueError, match='meta_hazard_nosmart = "build/models/hazard_nosmart'):
+        report(ctx)
+    assert (tmp_path / "report" / "results.md").exists()

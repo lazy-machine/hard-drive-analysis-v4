@@ -54,10 +54,13 @@ def test_extract_dedups_and_cuts_at_failure(pipeline_run):
     dup = con.sql("SELECT count(*) - count(DISTINCT (serial_number, date)) "
                   f"FROM {panel}").fetchall()[0][0]
     assert dup == 0
-    after = con.sql(f"""SELECT count(*) FROM {panel} p
-        JOIN read_parquet('{project}/build/cohort.parquet') c USING (serial_number)
-        WHERE c.failure_date IS NOT NULL AND p.date > c.failure_date""").fetchall()[0][0]
-    assert after == 0
+    after = """SELECT count(*) FROM {} p
+        JOIN read_parquet('{}/build/cohort.parquet') c USING (serial_number)
+        WHERE c.failure_date IS NOT NULL AND p.date > c.failure_date"""
+    source = f"read_parquet('{project}/dataset/dataset.parquet')"
+    assert con.sql(after.format(source, project)).fetchall()[0][0] > 0, \
+        "synthetic data should contain cohort drives reporting after failure"
+    assert con.sql(after.format(panel, project)).fetchall()[0][0] == 0
     # the VARCHAR-typed columns were cast, not dropped
     filled = con.sql(f"SELECT count(smart_22_raw) FROM {panel}").fetchall()[0][0]
     assert filled > 0

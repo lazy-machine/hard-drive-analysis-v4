@@ -10,7 +10,8 @@ import pyarrow as pa
 
 from common import (
     ID_COLUMNS, LABEL_COLUMNS, Progress, connect, left_truncated, load_sample, load_study,
-    month_chunks, q, scalar, smart_columns, stable_unit, trend_columns, write_json,
+    STRIDE_EPOCH, month_chunks, q, scalar, smart_columns, stable_unit, stride_offset,
+    trend_columns, write_json,
 )
 
 # days_in_service counts from the drive's first row in the panel, which starts in 2016.
@@ -25,7 +26,7 @@ def _register_cohort(con, cohort: pd.DataFrame, batches: int, stride: int) -> No
     """Expose the cohort to SQL with per-drive batch and stride offset (stable hashes)."""
     c = cohort.copy()
     c["batch"] = [int(stable_unit(s, "batch") * batches) for s in c["serial_number"]]
-    c["stride_offset"] = [int(stable_unit(s, "stride") * stride) for s in c["serial_number"]]
+    c["stride_offset"] = [stride_offset(s, stride) for s in c["serial_number"]]
     con.register("cohort_arrow", pa.Table.from_pandas(c, preserve_index=False))
     con.sql("CREATE TABLE cohort AS SELECT * FROM cohort_arrow")
     con.unregister("cohort_arrow")
@@ -224,7 +225,7 @@ def snapshots(ctx):
             SELECT *,
                    failure_date IS NOT NULL AND failure_date <= censor_date
                        AND date_diff('day', date, failure_date) < {dense} AS in_dense,
-                   (date_diff('day', DATE '2000-01-01', date) + stride_offset) % {stride} = 0
+                   (date_diff('day', DATE '{STRIDE_EPOCH}', date) + stride_offset) % {stride} = 0
                        AS on_stride,
                    failure_date IS NOT NULL AND failure_date <= censor_date AS event
             FROM labelled
