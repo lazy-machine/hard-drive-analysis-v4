@@ -1,4 +1,8 @@
-"""The saved model text does not depend on the thread count or the histogram fallback."""
+"""The saved model text leaves out the thread count and the histogram fallback.
+
+Row- and column-wise histograms can still round leaf values differently (see HISTOGRAM in
+model.py); this only removes the parameter block's differences.
+"""
 
 from __future__ import annotations
 
