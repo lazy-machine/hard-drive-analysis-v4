@@ -9,8 +9,8 @@ checkpoints it, and skips it when nothing it depends on changed.
 - Tests: `uv run pytest -q` (project, runner and gate suites, ~4 min)
 - Lint: `uv run ruff check src steps tests`
 - Dry run: `uv run data-pipeline -n`
-- Run: `uv run data-pipeline` (scale in `config/sample.toml`: `small` by default, `full` for
-  real results)
+- Run: `uv run data-pipeline` (scale in `config/sample.toml`: `full` by default, `small` for
+  a quick check)
 - Gate reference: `uv run data-verify checks`, `uv run data-verify params`
 
 CI (`.github/workflows/test.yml`) runs lint and tests on every push and pull request.

@@ -14,9 +14,9 @@
 # Changing the scale reruns cohort and everything downstream. drive_index (the
 # full-panel scan) does not read this file, so it stays cached.
 
-# Committed as "small" so a plain `uv run data-pipeline` finishes in minutes. Set "full" for
-# result runs (about 70 minutes, 11 GiB).
-scale = "small"
+# Committed as "full", the scale the results come from (about 2 hours, 32 GB machine).
+# Set "small" for a quick check that finishes in minutes.
+scale = "full"
 
 [scales.small]
 # Runs in a few minutes on a 15 GB laptop once drive_index is cached.
