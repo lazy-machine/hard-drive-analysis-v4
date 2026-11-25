@@ -111,7 +111,6 @@ def test_per_drive_shares_are_weighted_to_the_fleet():
     val = _frame([(f"v{i}", "2023-01-01", 300, 0, i / 100, "healthy", "X", "V", 4)
                   for i in range(100)])
     D = Drives(test)
-    assert len(set(D.strata)) == 3
     models = {"m": {"kind": "binary", "horizons": [30]}}
     (a,), _ = alerting(val, test, D, models, 30, [0.05], 0.05, 5, [0, 7, 30], 5, 1)
     assert a["failing_drives_alerted"] == 3 and a["failing_drives"] == 4
@@ -126,6 +125,25 @@ def test_per_drive_shares_are_weighted_to_the_fleet():
     assert zero["share_failing_drives_alerted"] == 1.0
     (w,) = windowed_alerts(test, D, models, 30, 1, [0.5], 5, 1, "Q", pair=("m", "m"))["matched"]
     assert np.isclose(w["share_failing_drives_alerted"], 3 / 8)
+
+
+def test_bootstrap_pools_older_and_new_drives_of_a_stratum():
+    """New failing drives are all alerted, older ones none. Resampling within each weight
+    would fix that mix and give a zero-width interval; pooling within the stratum does not."""
+    rows = [(f"new{k}", "2025-01-01", 5, 1, 0.99, "failing", "X", "V", 4) for k in range(6)]
+    rows += [(f"old{k}", "2025-01-01", 5, 1, 0.1, "failing", "X", "V", 4) for k in range(6)]
+    rows += [(f"h{k}", "2025-01-01", 300, 0, 0.1, "healthy", "X", "V", 4) for k in range(6)]
+    test = _frame(rows)
+    test.loc[test["serial_number"].str.startswith("old"), ["weight", "drive_weight"]] = 5.0
+    val = _frame([(f"v{i}", "2023-01-01", 300, 0, i / 100, "healthy", "X", "V", 4)
+                  for i in range(100)])
+    D = Drives(test)
+    assert set(D.strata) == {"failing", "healthy"}
+    models = {"m": {"kind": "binary", "horizons": [30]}}
+    (a,), _ = alerting(val, test, D, models, 30, [0.05], 0.05, 5, [0, 7, 30], 50, 1)
+    assert np.isclose(a["share_failing_drives_alerted"], 6 / 36)
+    lo, hi = a["share_failing_drives_alerted_ci"]
+    assert lo < 6 / 36 < hi
 
 
 def test_groups_split_the_firmware_model_from_its_vendor():

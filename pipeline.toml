@@ -128,6 +128,7 @@ fitted_levels = [{ name = "model_code", levels = { from = "schema", key = "categ
 
 # Python checks in steps/hdd_checks.py
 custom = ["hdd_checks:stride_rows_on_stride_days", "hdd_checks:cohort_split_matches_stable_bucket",
+          "hdd_checks:cohort_matches_drive_index",
           "hdd_checks:cohort_stratum_matches_rule", "hdd_checks:features_are_float",
           "hdd_checks:few_sparse_features"]
 
@@ -177,7 +178,7 @@ sql = """SELECT s.serial_number, s.split, c.split AS cohort_split FROM snapshots
 [[steps.params.assert]]
 name = "cohort_weights_match_sampling"
 category = "weights"
-description = "1 / sampling fraction, times 1 / (test share of the buckets) for test drives seen by train_end"
+description = "1 / sampling fraction, times 1 / (test share of the buckets) for test drives first seen on or before train_end"
 sql = """SELECT serial_number, split, stratum, first_date, drive_weight FROM cohort
          WHERE drive_weight IS NULL
             OR abs(drive_weight - CASE stratum WHEN 'failing' THEN 1 / ${failing_fraction}

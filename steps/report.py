@@ -377,7 +377,8 @@ def _results(metrics, cohort, gate, preds, ref, labels) -> list[str]:
         ["validation snapshots", span("val")],
         ["test snapshots", span("test")],
         ["test set", f"{test['drives']} drives, {test['failing_drives']} fail "
-                     f"({test.get('silent_failing_drives', 'n/a')} silent), "
+                     f"({test.get('silent_failing_drives', 'n/a')} silent, "
+                     f"{_pct(test.get('silent_failing_share'), 1)} weighted), "
                      f"{test['snapshots']} snapshots"],
         ["reference model", _label(ref, labels)],
         ["compared with", f"{len(trained)} models and baselines (rows of the tables below)"],
@@ -778,7 +779,8 @@ def _alerting(metrics, ref, labels) -> list[str]:
                       "period; a failing drive "
                       f"({weekly.get('failing_drives_any_lead', '?')}) is caught if any weekly "
                       "check before its failure alerts. Thresholds set on test for each share; "
-                      "lead = days from the first alert to the failure (quartiles).", ""]
+                      "lead = days from the first alert to the failure (quartiles). The caught "
+                      "share and the lead days are weighted to the fleet.", ""]
             lines += table(["non-failing drives alerted", "model", "failing drives caught",
                             "difference vs the rule (paired)", "lead days (25/50/75%)",
                             f"first alert within {main['horizon']} days"],
@@ -1078,8 +1080,9 @@ def _answer(disc, gains, metrics, ref, labels, tolerance) -> list[str]:
             out.append(
                 f"- **Silent failures** (no critical counter above zero in any test "
                 f"snapshot): {metrics['test']['silent_failing_drives']} of the "
-                f"{metrics['test']['failing_drives']} sampled failing test drives (unweighted). "
-                "On them the "
+                f"{metrics['test']['failing_drives']} sampled failing test drives, "
+                f"{_pct(metrics['test'].get('silent_failing_share'), 1)} of them weighted to "
+                "the fleet. On them the "
                 f"{H}-day ROC-AUC of {_label(ref, labels)} is "
                 f"{est(s['auc'], s['auc_ci'])} against {est(o['auc'], o['auc_ci'])} overall: "
                 f"{verdict}.")

@@ -2,8 +2,11 @@
 
 All metrics are weighted by inverse sampling probability, so they estimate real-world
 values (true failure prevalence), and confidence intervals come from a drive-level
-bootstrap that resamples drives within their sampling stratum and weight (as they were
-sampled).
+bootstrap. Every section that resamples test drives through Drives.boot draws failing and
+healthy drives separately, as they were sampled; older and new test drives are pooled
+within each stratum, since how many older drives land in the test buckets is itself random.
+The two calibration bootstraps (calibration_in_the_large, calibration_by_group) resample
+all drives of a split-year or group together.
 Only the alert threshold uses data outside test: it is set on the validation drives that
 calibrate the models.
 
@@ -176,9 +179,7 @@ class Drives:
         self.d, self.e, self.w = (test[c].to_numpy() for c in ("duration_days", "event", "weight"))
         self.drive_w = test["drive_weight"].to_numpy()
         self.weight_of_drive = self.drive_w[first]
-        # older and new test drives were kept at different rates: each rate is a stratum
-        self.strata = np.array([f"{s}/{x}" for s, x in zip(
-            test["stratum"].to_numpy()[first], self.weight_of_drive, strict=True)])
+        self.strata = test["stratum"].to_numpy()[first]
         self.fails = np.zeros(self.n, dtype=bool)
         np.logical_or.at(self.fails, self.codes, self.e == 1)
         self.G = censoring_survival(self.d, self.e, self.w)
@@ -1313,10 +1314,14 @@ def evaluate(ctx):
         "models": models,
         "test": {"snapshots": len(test), "drives": D.n,
                  "failing_drives": int(test.loc[test["event"] == 1, "serial_number"].nunique()),
-                 "silent_failing_drives": int(silent.sum())},
+                 "silent_failing_drives": int(silent.sum()),
+                 "silent_failing_share": float(D.weight_of_drive[silent].sum()
+                                               / D.weight_of_drive[D.fails].sum())},
         "binary_horizon": H,
         "bootstrap_rounds": rounds,
-        "bootstrap": "drive-level, each sampling stratum and weight resampled separately",
+        "bootstrap": ("drive-level; failing and healthy drives resampled separately, older and "
+                      "new pooled; calibration_in_the_large and calibration_by_group "
+                      "resample all drives of the group together"),
         "discrimination": disc,
         "skipped_horizons": skipped,
         "reference_gain": diffs,

@@ -39,11 +39,12 @@ dense_days = 90
 [scales.full]
 # Every failing HDD plus a 10% weighted sample of healthy ones (a train/val drive failing
 # after train_end is healthy here). Sized for a 31 GB machine. 15,776 failing and 35,729
-# healthy drives, before test got the drives first seen after train_end. Measured there on
-# 2026-10-24, before the stratum used train_end, with 22,230 failing and 35,079 healthy: 8.7M
-# train+val snapshots, 55M survival rows (48.2M train), 17.8 GiB training estimate with 23 GiB
-# available (about 3 GiB under the memory guard), ~30 min end to end. Healthy drives are subsampled even here: the full daily
-# panel expanded into survival rows would need several hundred GB.
+# healthy drives, before test got the drives first seen after train_end. Measured there
+# on 2026-10-24, before the stratum used train_end, with 22,230 failing and 35,079
+# healthy: 8.7M train+val snapshots, 55M survival rows (48.2M train), 17.8 GiB training
+# estimate with 23 GiB available (about 3 GiB under the memory guard), ~30 min end to
+# end. Healthy drives are subsampled even here: the full daily panel expanded into
+# survival rows would need several hundred GB.
 failing_fraction = 1.0
 healthy_fraction = 0.1
 stride_days = 7

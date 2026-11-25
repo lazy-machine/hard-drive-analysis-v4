@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from common import on_stride, stable_bucket
-from drives import assign_split, first_seen_after_train, stratum
+from common import load_sample, load_study, on_stride, stable_bucket
+from drives import assign_split, first_seen_after_train, select_cohort, stratum
 
 
 def stride_rows_on_stride_days(v):
@@ -54,6 +54,26 @@ def cohort_split_matches_stable_bucket(v):
           f"{len(wrong)} of {len(cohort)} cohort drives in the wrong split", category="split",
           details={"drives": len(wrong), "examples": sorted(wrong)[:5]},
           hint="The cohort step and the split rule in config/study.toml disagree.")
+
+
+def cohort_matches_drive_index(v):
+    """The cohort is the one drives.select_cohort draws from the drive index: same drives,
+    splits and weights. The other cohort checks only see the drives that are in it, so a
+    drive left out of the cohort (and of the snapshots) would pass them."""
+    want, _ = select_cohort(v.dataset("drives"), load_study(v.inputs["study"]),
+                            load_sample(v.inputs["sample"]))
+    have = v.dataset("cohort")[["serial_number", "split", "drive_weight"]]
+    m = want[["serial_number", "split", "drive_weight"]].merge(
+        have, on="serial_number", how="outer", suffixes=("", "_cohort"), indicator=True)
+    bad = m[(m["_merge"] != "both") | (m["split"] != m["split_cohort"])
+            | ~np.isclose(m["drive_weight"], m["drive_weight_cohort"], rtol=1e-12, atol=0)]
+    kinds = bad["_merge"].map({"left_only": "missing", "right_only": "extra",
+                               "both": "split or weight"}).value_counts()
+    v.add("cohort_matches_drive_index", bad.empty,
+          f"{len(bad)} drive(s) differ from the cohort the drive index gives: "
+          f"{kinds.to_dict()}", category="split",
+          details={"drives": len(bad), "examples": sorted(bad["serial_number"])[:5]},
+          hint="The cohort is not select_cohort's output for this drive index and config.")
 
 
 def cohort_stratum_matches_rule(v):

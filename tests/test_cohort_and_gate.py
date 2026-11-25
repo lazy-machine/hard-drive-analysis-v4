@@ -312,8 +312,21 @@ def test_gate_catches_new_train_bucket_drive_left_in_train(pipeline_run, tmp_pat
             "THEN 'train' ELSE split END AS split) FROM ")
     blocking = _gate_on(project, tmp_path, snapshots_sql=swap + "snapshots",
                         cohort_sql=swap + "cohort")
-    assert {"split.rule", "custom.cohort_split_matches_stable_bucket"} <= blocking
+    assert {"split.rule", "custom.cohort_split_matches_stable_bucket",
+            "custom.cohort_matches_drive_index"} <= blocking
     assert "assert.snapshot_split_matches_cohort" not in blocking
+
+
+def test_gate_catches_new_drives_left_out(pipeline_run, tmp_path):
+    """The old rule's cohort: new train/val-bucket drives dropped from cohort and snapshots.
+    Every check that reads only the cohort's drives passes; the drive index catches it."""
+    project, _ = pipeline_run
+    cohort = f"read_parquet('{project}/build/cohort.parquet')"
+    new = (f"serial_number NOT IN (SELECT serial_number FROM {cohort} "
+           "WHERE first_date > DATE '2023-12-31' AND bucket < 80)")
+    blocking = _gate_on(project, tmp_path, cohort_sql=f"SELECT * FROM cohort WHERE {new}",
+                        snapshots_sql=f"SELECT * FROM snapshots WHERE {new}")
+    assert blocking == {"custom.cohort_matches_drive_index"}
 
 
 @pytest.mark.parametrize("which,factor", [
@@ -331,7 +344,8 @@ def test_gate_catches_wrong_test_share_factor(pipeline_run, tmp_path, which, fac
         project, tmp_path,
         cohort_sql=scaled.format(d=drive, c="drive_weight", f=factor, t="cohort"),
         snapshots_sql=scaled.format(d=drive, c="weight", f=factor, t="snapshots"))
-    assert blocking == {"assert.cohort_weights_match_sampling"}
+    assert blocking == {"assert.cohort_weights_match_sampling",
+                        "custom.cohort_matches_drive_index"}
 
 
 @pytest.mark.parametrize("op,split,first_date", [

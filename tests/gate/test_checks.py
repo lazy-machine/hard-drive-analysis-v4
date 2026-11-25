@@ -1044,6 +1044,12 @@ BASE_FEATS = ["f1", "f2", "f3", "f4", "plan", "region"]
     ({"split_rule": {"key": "customer", "buckets": {"train": [0, 100]}, "override": {
         "split": "test", "dataset": "nope", "column": "d", "after": "2024-01-01"}}},
      "'nope' is not an input"),
+    ({"split_rule": {"key": "customer", "buckets": {"train": [0, 100]}, "override": {
+        "split": "train", "dataset": "train", "column": "date", "after": "NaT"}}},
+     "must be a date"),
+    ({"split_rule": {"key": "customer", "buckets": {"train": [0, 100]}, "override": {
+        "split": "test", "dataset": "train", "column": "date", "after": "2024-01-01"}}},
+     "not in split_rule.buckets"),
 ])
 def test_config_errors_are_helpful(case, splits, bad, match):
     from data_verify import SpecError

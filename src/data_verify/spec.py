@@ -549,6 +549,16 @@ def parse(params: dict[str, Any], inputs: dict[str, Path], known_checks) -> Spec
                     "split_rule.override must be { split, dataset, column, after }")
             _expect(over["dataset"] in inputs, "split_rule.override.dataset = "
                     f"'{over['dataset']}' is not an input" + suggest(str(over["dataset"]), inputs))
+            _expect(over["split"] in rule["buckets"],
+                    f"split_rule.override.split = {over['split']!r} is not in split_rule.buckets")
+            _expect(isinstance(over["column"], str), "split_rule.override.column must be a "
+                    "column name")
+            try:
+                after = pd.Timestamp(str(over["after"]))
+            except ValueError:
+                after = pd.NaT
+            _expect(not pd.isna(after), f"split_rule.override.after = {over['after']!r} must "
+                    "be a date like '2023-12-31'")
         s.split_rule = rule
 
     if (ratios := p.get("split_ratios")) is not None:
