@@ -67,7 +67,7 @@ def cohort_matches_drive_index(v):
         have, on="serial_number", how="outer", suffixes=("", "_cohort"), indicator=True)
     bad = m[(m["_merge"] != "both") | (m["split"] != m["split_cohort"])
             | ~np.isclose(m["drive_weight"], m["drive_weight_cohort"], rtol=1e-12, atol=0)]
-    kinds = bad["_merge"].map({"left_only": "missing", "right_only": "extra",
+    kinds = bad["_merge"].astype(str).map({"left_only": "missing", "right_only": "extra",
                                "both": "split or weight"}).value_counts()
     v.add("cohort_matches_drive_index", bad.empty,
           f"{len(bad)} drive(s) differ from the cohort the drive index gives: "

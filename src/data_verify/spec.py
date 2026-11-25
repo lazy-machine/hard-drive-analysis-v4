@@ -547,12 +547,12 @@ def parse(params: dict[str, Any], inputs: dict[str, Path], known_checks) -> Spec
             _expect(method != "values", "split_rule.override needs a bucket method")
             _expect(isinstance(over, dict) and set(over) == {"split", "dataset", "column", "after"},
                     "split_rule.override must be { split, dataset, column, after }")
+            _expect(all(isinstance(over[k], str) for k in ("split", "dataset", "column")),
+                    "split_rule.override.split, .dataset and .column must be strings")
             _expect(over["dataset"] in inputs, "split_rule.override.dataset = "
                     f"'{over['dataset']}' is not an input" + suggest(str(over["dataset"]), inputs))
             _expect(over["split"] in rule["buckets"],
                     f"split_rule.override.split = {over['split']!r} is not in split_rule.buckets")
-            _expect(isinstance(over["column"], str), "split_rule.override.column must be a "
-                    "column name")
             try:
                 after = pd.Timestamp(str(over["after"]))
             except ValueError:

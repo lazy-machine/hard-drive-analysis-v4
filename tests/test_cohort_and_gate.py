@@ -329,6 +329,21 @@ def test_gate_catches_new_drives_left_out(pipeline_run, tmp_path):
     assert blocking == {"custom.cohort_matches_drive_index"}
 
 
+def test_gate_catches_extra_cohort_drive(pipeline_run, tmp_path):
+    """A drive the sample did not pick, added to the cohort with its drive-index dates."""
+    project, _ = pipeline_run
+    build = project / "build"
+    serial = duckdb.sql(f"""SELECT min(serial_number) FROM read_parquet('{build}/drives.parquet')
+                            WHERE model NOT LIKE '%SSD%' AND serial_number NOT IN
+                            (SELECT serial_number FROM read_parquet('{build}/cohort.parquet'))
+                         """).fetchall()[0][0]
+    blocking = _gate_on(project, tmp_path, cohort_sql=f"""
+        SELECT * FROM cohort UNION ALL
+        SELECT * REPLACE ('{serial}' AS serial_number) FROM cohort
+        WHERE serial_number = (SELECT min(serial_number) FROM cohort)""")
+    assert "custom.cohort_matches_drive_index" in blocking
+
+
 @pytest.mark.parametrize("which,factor", [
     ("split = 'test' AND first_date <= DATE '2023-12-31'", 1 / 5),   # older, without the factor
     ("split = 'test' AND first_date > DATE '2023-12-31'", 5),        # new, with the factor

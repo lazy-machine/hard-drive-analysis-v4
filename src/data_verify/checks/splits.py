@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 
 from ..core import (
-    check, examples, failed, fmt, frac, jsonable, passed, row_hashes, skipped, to_datetime,
-    value_set, value_texts,
+    check, examples, failed, fmt, frac, jsonable, passed, read_table, row_hashes, skipped,
+    to_datetime, value_set, value_texts,
 )
 
 
@@ -124,7 +124,7 @@ def rule(v, opt):
         return failed(f"split_rule.key '{key}' missing in some split")
     over, when = r.get("override"), None
     if over:
-        d = v.dataset(over["dataset"])
+        d = read_table(v.inputs[over["dataset"]], v.spec.allow_pickle)
         if missing := [c for c in (key, over["column"]) if c not in d.columns]:
             return failed(f"split_rule.override: '{over['dataset']}' lacks column(s) {missing}")
         when = pd.Series(to_datetime(d[over["column"]]).to_numpy(), index=d[key].astype("string"))

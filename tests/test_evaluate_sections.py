@@ -127,6 +127,30 @@ def test_per_drive_shares_are_weighted_to_the_fleet():
     assert np.isclose(w["share_failing_drives_alerted"], 3 / 8)
 
 
+def test_first_alert_lead_days_are_weighted():
+    """Caught failing drives: one weighing 5 alerted 20 days ahead, two weighing 1 alerted 2
+    days ahead. Weighted, the median lead is 20 days and 2 of 7 alerted within a week."""
+    day = "2025-01-01"
+    rows = [("old", day, 20, 1, 0.99, "failing", "X", "V", 4),
+            ("new1", day, 2, 1, 0.99, "failing", "X", "V", 4),
+            ("new2", day, 2, 1, 0.99, "failing", "X", "V", 4),
+            ("q1", day, 300, 0, 0.1, "healthy", "X", "V", 4),
+            ("q2", day, 300, 0, 0.1, "healthy", "X", "V", 4)]
+    test = _frame(rows)
+    test.loc[test["serial_number"] == "old", ["weight", "drive_weight"]] = 5.0
+    val = _frame([(f"v{i}", "2023-01-01", 300, 0, i / 100, "healthy", "X", "V", 4)
+                  for i in range(100)])
+    models = {"m": {"kind": "binary", "horizons": [7]}}
+    test["m__p7"] = test["s"]
+    val["m__p7"] = val["s"]
+    out = weekly_alerts(val, test, Drives(test), models, 7, [0.05], 1, [0.5], 5, 1,
+                        pair=("m", "m"))
+    (r,) = out["matched_first_alert"]
+    assert r["share_failing_drives_alerted"] == 1.0
+    assert r["first_alert_lead_days_quartiles"] == [2.0, 20.0, 20.0]
+    assert np.isclose(r["share_caught_first_alerted_within_horizon"], 2 / 7)
+
+
 def test_bootstrap_pools_older_and_new_drives_of_a_stratum():
     """New failing drives are all alerted, older ones none. Resampling within each weight
     would fix that mix and give a zero-width interval; pooling within the stratum does not."""

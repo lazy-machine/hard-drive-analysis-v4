@@ -2,9 +2,10 @@
 
 All metrics are weighted by inverse sampling probability, so they estimate real-world
 values (true failure prevalence), and confidence intervals come from a drive-level
-bootstrap. Every section that resamples test drives through Drives.boot draws failing and
-healthy drives separately, as they were sampled; older and new test drives are pooled
-within each stratum, since how many older drives land in the test buckets is itself random.
+bootstrap. Every section that resamples test or validation drives through Drives.boot
+draws failing and healthy drives separately, as they were sampled; older and new test
+drives are pooled within each stratum, since how many older drives land in the test buckets
+is itself random.
 The two calibration bootstraps (calibration_in_the_large, calibration_by_group) resample
 all drives of a split-year or group together.
 Only the alert threshold uses data outside test: it is set on the validation drives that
@@ -1320,8 +1321,8 @@ def evaluate(ctx):
         "binary_horizon": H,
         "bootstrap_rounds": rounds,
         "bootstrap": ("drive-level; failing and healthy drives resampled separately, older and "
-                      "new pooled; calibration_in_the_large and calibration_by_group "
-                      "resample all drives of the group together"),
+                      "new pooled; calibration_in_the_large resamples all drives of a "
+                      "split-year together, calibration_by_group all drives of a group"),
         "discrimination": disc,
         "skipped_horizons": skipped,
         "reference_gain": diffs,
