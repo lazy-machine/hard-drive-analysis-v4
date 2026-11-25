@@ -2,12 +2,14 @@
 
 All metrics are weighted by inverse sampling probability, so they estimate real-world
 values (true failure prevalence), and confidence intervals come from a drive-level
-bootstrap that resamples failing and healthy drives separately (as they were sampled).
+bootstrap that resamples drives within their sampling stratum and weight (as they were
+sampled).
 Only the alert threshold uses data outside test: it is set on the validation drives that
 calibrate the models.
 
 Units: discrimination, calibration and precision are per drive-day snapshot; the
-"failing drives alerted" counts and the auc_drive column are per drive.
+"failing drives alerted" figures and the auc_drive column are per drive. Counts of drives
+are sampled drives; shares of drives are weighted by drive_weight.
 
 Sections of metrics.json:
 - discrimination: per horizon and model, ROC-AUC, PR-AUC (average precision) and Brier
@@ -60,7 +62,8 @@ from common import (
 from metrics import (
     DriveCells, RankedScores, bootstrap_drive_counts, censoring_survival, concordance,
     ipcw_weights, km_failure, one_per_drive, uno_concordance, weighted_auc,
-    weighted_average_precision, weighted_brier, weighted_median, weighted_quantile_threshold,
+    weighted_average_precision, weighted_brier, weighted_median, weighted_quantile,
+    weighted_quantile_threshold,
 )
 from survival import known_status
 
@@ -170,10 +173,12 @@ class Drives:
         self.codes, uniques = pd.factorize(test["serial_number"])
         self.n = len(uniques)
         first = pd.Series(np.arange(len(test))).groupby(self.codes).first().to_numpy()
-        self.strata = test["stratum"].to_numpy()[first]
         self.d, self.e, self.w = (test[c].to_numpy() for c in ("duration_days", "event", "weight"))
         self.drive_w = test["drive_weight"].to_numpy()
         self.weight_of_drive = self.drive_w[first]
+        # older and new test drives were kept at different rates: each rate is a stratum
+        self.strata = np.array([f"{s}/{x}" for s, x in zip(
+            test["stratum"].to_numpy()[first], self.weight_of_drive, strict=True)])
         self.fails = np.zeros(self.n, dtype=bool)
         np.logical_or.at(self.fails, self.codes, self.e == 1)
         self.G = censoring_survival(self.d, self.e, self.w)
@@ -543,7 +548,7 @@ def alerting(val, test, D, models, horizon, rates, main_rate, lead, edges, round
                       early_alert=early_alert, quiet_alerted=quiet_alerted):
                 tp, fp = np.sum(w[alert & positive]), np.sum(w[alert & healthy])
                 unk = np.sum(w[alert & unknown])
-                f = drive_counts[failing_drives]
+                f = (drive_counts * D.weight_of_drive)[failing_drives]
                 qw = (drive_counts * D.weight_of_drive)[quiet]
                 quiet_hit = np.sum(qw * quiet_alerted[quiet])
                 caught = np.sum(f * any_alert[failing_drives])
@@ -642,7 +647,7 @@ def weekly_alerts(val, test, D, models, horizon, rates, stride, targets, rounds,
             t = weighted_quantile_threshold(s_val[healthy_val], w_val[healthy_val], rate)
 
             def stats(c, t=t, qmax=qmax, fmax=fmax):
-                qw, fw = (c * dw)[quiet], c[failing].astype(float)
+                qw, fw = (c * dw)[quiet], (c * dw)[failing]
                 hit, false = np.sum(fw * (fmax >= t)), np.sum(qw * (qmax >= t))
                 return (float(hit / fw.sum()), float(false / qw.sum()),
                         float(false / hit) if hit > 0 else np.nan)
@@ -676,7 +681,7 @@ def weekly_alerts(val, test, D, models, horizon, rates, stride, targets, rounds,
     def caught(name, c, target, table=None, pos=None):
         qmax, fmax = (table or maxima)[name]
         pos = failing if pos is None else pos
-        qw, fw = (c * dw)[quiet], c[pos].astype(float)
+        qw, fw = (c * dw)[quiet], (c * dw)[pos]
         t = weighted_quantile_threshold(qmax, qw, target)
         return (float(np.sum(fw * (fmax >= t)) / fw.sum()),
                 float(np.sum(qw * (qmax >= t)) / qw.sum()))
@@ -716,12 +721,13 @@ def weekly_alerts(val, test, D, models, horizon, rates, stride, targets, rounds,
         hit = any_rows & (s >= t)
         lead = np.full(D.n, -1.0)
         np.maximum.at(lead, D.codes[hit], D.d[hit].astype(float))
-        lead = lead[failing_any]
-        lead = lead[lead >= 0]
+        hit_drives = failing_any[lead[failing_any] >= 0]
+        lead, lw = lead[hit_drives], dw[hit_drives]
         if lead.size:
-            row["first_alert_lead_days_quartiles"] = [float(q) for q in
-                                                      np.percentile(lead, [25, 50, 75])]
-            row["share_caught_first_alerted_within_horizon"] = float(np.mean(lead < horizon))
+            row["first_alert_lead_days_quartiles"] = [weighted_quantile(lead, lw, p)
+                                                      for p in (0.25, 0.5, 0.75)]
+            row["share_caught_first_alerted_within_horizon"] = float(
+                np.average(lead < horizon, weights=lw))
     # the operator's criterion: any critical counter above zero, i.e. the rule's score > 0
     # (it is a sum of log1p counters). Its own point, and the models at its share of
     # non-failing drives alerted.
@@ -732,7 +738,7 @@ def weekly_alerts(val, test, D, models, horizon, rates, stride, targets, rounds,
 
         def zero_point(c):
             qw = (c * dw)[quiet]
-            fw, fa = c[failing].astype(float), c[failing_any].astype(float)
+            fw, fa = (c * dw)[failing], (c * dw)[failing_any]
             return (float(np.sum(qw * (qr > 0)) / qw.sum()),
                     float(np.sum(fw * (fr > 0)) / fw.sum()),
                     float(np.sum(fa * (fr_any > 0)) / fa.sum()))
@@ -857,7 +863,7 @@ def windowed_alerts(test, D, models, horizon, stride, targets, rounds, seed, fre
 
     def caught(name, c, target, keep=None):
         qmax, fmax = maxima[name]
-        qw, fw = (c * dw)[neg_drive], c[pos_drive].astype(float)
+        qw, fw = (c * dw)[neg_drive], (c * dw)[pos_drive]
         if keep is not None:
             qw = qw * keep
         t = weighted_quantile_threshold(qmax, qw, target)
@@ -1310,7 +1316,7 @@ def evaluate(ctx):
                  "silent_failing_drives": int(silent.sum())},
         "binary_horizon": H,
         "bootstrap_rounds": rounds,
-        "bootstrap": "drive-level, failing and healthy strata resampled separately",
+        "bootstrap": "drive-level, each sampling stratum and weight resampled separately",
         "discrimination": disc,
         "skipped_horizons": skipped,
         "reference_gain": diffs,

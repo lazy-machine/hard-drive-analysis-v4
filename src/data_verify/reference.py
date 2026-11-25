@@ -62,7 +62,9 @@ PARAMS: list[tuple[str, list[tuple[str, str, str]]]] = [
         ("split_rule", "table",
          "How splits were assigned. { key, method = sha256|sha1|md5|modulo|values, "
          "template = \"{key}\", modulo = 100, buckets = { train = [0, 70], ... } } or "
-         "{ key, method = \"values\", values = { train = [...], ... } }."),
+         "{ key, method = \"values\", values = { train = [...], ... } }. With buckets, "
+         "override = { split, dataset, column, after }: a key whose `column` in `dataset` (one "
+         "row per key) is later than `after` belongs to `split`, whatever its bucket."),
         ("split_ratios", "table",
          "Planned shares, e.g. { train = 0.7, val = 0.1, test = 0.2, tolerance = 0.05, "
          "unit = \"rows\" | \"groups\" }."),

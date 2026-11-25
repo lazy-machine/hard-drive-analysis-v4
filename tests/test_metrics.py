@@ -9,7 +9,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from metrics import (
     bootstrap_counts, bootstrap_drive_counts, censoring_survival, concordance, ipcw_weights,
     km_failure, one_per_drive, uno_concordance, weighted_auc, weighted_average_precision,
-    weighted_median, weighted_quantile_threshold,
+    weighted_median, weighted_quantile, weighted_quantile_threshold,
 )
 
 
@@ -269,6 +269,15 @@ def test_weighted_median():
     assert weighted_median(np.array([2.0] * 3 + [100.0] * 3), np.full(6, 1 / 0.03)) == 51.0
     assert weighted_median(x, np.array([1.0, 0.0, 1.0])) == 50.5
     assert np.isnan(weighted_median(x, np.zeros(3)))
+
+
+def test_weighted_quantile():
+    x = np.array([30.0, 10.0, 20.0, 40.0])
+    w = np.array([1.0, 5.0, 1.0, 1.0])
+    repeated = np.sort(np.repeat(x, w.astype(int)))
+    for p in (0.25, 0.5, 0.75, 0.9):
+        assert weighted_quantile(x, w, p) == np.percentile(
+            repeated, 100 * p, method="averaged_inverted_cdf")
 
 
 def test_life_table_weights_the_median_and_keeps_coverage_unrounded():

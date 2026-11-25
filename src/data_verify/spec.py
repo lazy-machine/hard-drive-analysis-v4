@@ -523,7 +523,7 @@ def parse(params: dict[str, Any], inputs: dict[str, Path], known_checks) -> Spec
 
     if (rule := p.get("split_rule")) is not None:
         _expect(isinstance(rule, dict), "split_rule must be a table")
-        allowed = {"key", "method", "template", "modulo", "buckets", "values"}
+        allowed = {"key", "method", "template", "modulo", "buckets", "values", "override"}
         bad = set(rule) - allowed
         _expect(not bad, f"split_rule: unknown key(s) {sorted(bad)}; allowed {sorted(allowed)}")
         _expect(isinstance(rule.get("key"), str), "split_rule.key must be a column name")
@@ -543,6 +543,12 @@ def parse(params: dict[str, Any], inputs: dict[str, Path], known_checks) -> Spec
             rule.setdefault("modulo", 100)
             rule.setdefault("template", "{key}")
             _expect("{key}" in rule["template"], "split_rule.template must contain {key}")
+        if (over := rule.get("override")) is not None:
+            _expect(method != "values", "split_rule.override needs a bucket method")
+            _expect(isinstance(over, dict) and set(over) == {"split", "dataset", "column", "after"},
+                    "split_rule.override must be { split, dataset, column, after }")
+            _expect(over["dataset"] in inputs, "split_rule.override.dataset = "
+                    f"'{over['dataset']}' is not an input" + suggest(str(over["dataset"]), inputs))
         s.split_rule = rule
 
     if (ratios := p.get("split_ratios")) is not None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from common import on_stride, stable_bucket
-from drives import assign_split, stratum
+from drives import assign_split, first_seen_after_train, stratum
 
 
 def stride_rows_on_stride_days(v):
@@ -38,14 +38,17 @@ def stride_rows_on_stride_days(v):
 
 
 def cohort_split_matches_stable_bucket(v):
-    """Every cohort drive, including drives without snapshots, is in its bucket's split.
+    """Every cohort drive, including drives without snapshots, is in its rule's split: its
+    bucket's, or test if it was first seen after train_end.
 
     split.rule only sees snapshot rows; this covers the whole cohort, as drives.cohort
-    assigns it.
+    assigns it. cohort_dates_match_drives pins the first dates it reads.
     """
-    cfg = {f"{s}_buckets": v.var(f"{s}_buckets") for s in ("train", "val", "test")}
+    cfg = {k: v.var(k) for k in ("train_buckets", "val_buckets", "test_buckets", "train_end")}
     cohort = v.dataset("cohort")
-    expected = [assign_split(stable_bucket(s), cfg) for s in cohort["serial_number"]]
+    new = first_seen_after_train(cohort["first_date"], cfg)
+    expected = [assign_split(stable_bucket(s), n, cfg)
+                for s, n in zip(cohort["serial_number"], new, strict=True)]
     wrong = cohort.loc[cohort["split"].to_numpy() != expected, "serial_number"]
     v.add("cohort_split_matches_stable_bucket", wrong.empty,
           f"{len(wrong)} of {len(cohort)} cohort drives in the wrong split", category="split",
@@ -56,8 +59,9 @@ def cohort_split_matches_stable_bucket(v):
 def cohort_stratum_matches_rule(v):
     """Every cohort drive's stratum is what drives.stratum gives, so its weight follows.
 
-    cohort_weights_match_sampling checks drive_weight against stratum; this pins stratum
-    to the drive's failure date and split, with the rule the cohort step uses.
+    cohort_weights_match_sampling checks drive_weight against stratum, split and first date;
+    this pins stratum to the drive's failure date and split, with the rule the cohort step
+    uses.
     """
     cohort = v.dataset("cohort")
     expected = stratum(cohort, v.var("train_end"))

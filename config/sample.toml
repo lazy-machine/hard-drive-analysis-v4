@@ -5,9 +5,10 @@
 #   - a drive that fails within its split's view is kept with probability
 #     failing_fraction, every other drive with probability healthy_fraction (stable hash
 #     of the serial, independent of the split hash). Each kept drive carries weight
-#     1/fraction. A test drive counts as failing if it fails at any point in the panel, a
-#     train/val drive only if it fails by train_end: later failures are unknown to
-#     training and must not pick its drives.
+#     1/fraction, and a test drive first seen by train_end carries it times
+#     1 / (test buckets' share), see study.toml [split]. A test drive counts as failing if
+#     it fails at any point in the panel, a train/val drive only if it fails by train_end:
+#     later failures are unknown to training and must not pick its drives.
 #   - snapshots are taken every stride_days days (drive-specific offset), weight
 #     stride_days. In the dense_days before a failure every day is kept, weight 1.
 #
@@ -26,9 +27,10 @@ stride_days = 7
 dense_days = 60
 
 [scales.medium]
-# 3,119 failing and 7,308 healthy drives. Measured before the stratum used train_end,
-# with 4,394 failing and 7,181 healthy: ~8 min on a 15 GB box once drive_index is cached,
-# 1.74M train+val snapshots, 4.0 GiB training estimate.
+# 3,119 failing and 7,308 healthy drives, before test got the drives first seen after
+# train_end. Measured before the stratum used train_end, with 4,394 failing and 7,181
+# healthy: ~8 min on a 15 GB box once drive_index is cached, 1.74M train+val snapshots, 4.0
+# GiB training estimate.
 failing_fraction = 0.2
 healthy_fraction = 0.02
 stride_days = 7
@@ -37,10 +39,10 @@ dense_days = 90
 [scales.full]
 # Every failing HDD plus a 10% weighted sample of healthy ones (a train/val drive failing
 # after train_end is healthy here). Sized for a 31 GB machine. 15,776 failing and 35,729
-# healthy drives. Measured there on 2026-10-24, before the stratum used train_end, with
-# 22,230 failing and 35,079 healthy: 8.7M train+val snapshots, 55M survival rows (48.2M
-# train), 17.8 GiB training estimate with 23 GiB available (about 3 GiB under the memory
-# guard), ~30 min end to end. Healthy drives are subsampled even here: the full daily
+# healthy drives, before test got the drives first seen after train_end. Measured there on
+# 2026-10-24, before the stratum used train_end, with 22,230 failing and 35,079 healthy: 8.7M
+# train+val snapshots, 55M survival rows (48.2M train), 17.8 GiB training estimate with 23 GiB
+# available (about 3 GiB under the memory guard), ~30 min end to end. Healthy drives are subsampled even here: the full daily
 # panel expanded into survival rows would need several hundred GB.
 failing_fraction = 1.0
 healthy_fraction = 0.1

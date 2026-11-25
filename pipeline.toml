@@ -119,8 +119,9 @@ time_bounds.val = { max = { from = "study", key = "split.train_end" } }
 time_bounds.test = { min = { from = "study", key = "split.test_start" } }
 time_order = ["train < test", "val < test"]
 
-# drives go to splits by a stable sha256 bucket of the serial number (common.stable_bucket)
-split_rule = { key = "serial_number", method = "sha256", template = "split:{key}", modulo = 100, buckets = { train = { from = "study", key = "split.train_buckets" }, val = { from = "study", key = "split.val_buckets" }, test = { from = "study", key = "split.test_buckets" } } }
+# drives go to splits by a stable sha256 bucket of the serial number (common.stable_bucket),
+# except that every drive first seen after train_end goes to test
+split_rule = { key = "serial_number", method = "sha256", template = "split:{key}", modulo = 100, override = { split = "test", dataset = "drives", column = "first_date", after = { from = "study", key = "split.train_end" } }, buckets = { train = { from = "study", key = "split.train_buckets" }, val = { from = "study", key = "split.val_buckets" }, test = { from = "study", key = "split.test_buckets" } } }
 
 # drive-model categories are the most common models among train drives (+ "other")
 fitted_levels = [{ name = "model_code", levels = { from = "schema", key = "categorical.model_code" }, dataset = "cohort", column = "model", where = "split == 'train'", allow = ["other"], top_k = true }]
@@ -156,7 +157,8 @@ test_buckets = { from = "study", key = "split.test_buckets" }
 # temporal split on purpose: drift and label shift between periods are expected
 "drift.features" = "off"
 "labels.shift" = "off"
-# a drive's weight is 1/sampling fraction * stride; a 10x spread is by design
+# a drive's weight is 1/sampling fraction * stride; a 10x spread is by design (the check
+# reads train rows, so the older test drives' factor is not in it)
 "weights.concentration" = { max_ratio = 10000.0 }
 
 # -- project rules: labels, censoring and weights, recomputed from the cohort -------------
@@ -175,10 +177,14 @@ sql = """SELECT s.serial_number, s.split, c.split AS cohort_split FROM snapshots
 [[steps.params.assert]]
 name = "cohort_weights_match_sampling"
 category = "weights"
-sql = """SELECT serial_number, stratum, drive_weight FROM cohort
+description = "1 / sampling fraction, times 1 / (test share of the buckets) for test drives seen by train_end"
+sql = """SELECT serial_number, split, stratum, first_date, drive_weight FROM cohort
          WHERE drive_weight IS NULL
             OR abs(drive_weight - CASE stratum WHEN 'failing' THEN 1 / ${failing_fraction}
-                                               ELSE 1 / ${healthy_fraction} END) > 1e-9"""
+                                               ELSE 1 / ${healthy_fraction} END
+                                * CASE WHEN split = 'test' AND first_date <= DATE '${train_end}'
+                                       THEN 100 / ((${test_buckets})[2] - (${test_buckets})[1])
+                                       ELSE 1 END) > 1e-9"""
 
 [[steps.params.assert]]
 name = "cohort_dates_match_drives"

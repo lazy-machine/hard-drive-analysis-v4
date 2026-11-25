@@ -136,7 +136,15 @@ def _check_sha256(path, expected: str, log, chunk: int = 8 * 2**20) -> None:
     log(f"sha256 ok ({actual})")
 
 
-def assign_split(bucket: int, split_cfg: dict) -> str:
+def first_seen_after_train(first_date, split_cfg: dict) -> np.ndarray:
+    """True for drives with no row by train_end: train and validation cannot use them."""
+    return (pd.to_datetime(first_date) > pd.Timestamp(split_cfg["train_end"])).to_numpy()
+
+
+def assign_split(bucket: int, new: bool, split_cfg: dict) -> str:
+    """The bucket's split, but test for every drive first seen after train_end."""
+    if new:
+        return "test"
     for name in ("train", "val", "test"):
         lo, hi = split_cfg[f"{name}_buckets"]
         if lo <= bucket < hi:
@@ -159,6 +167,9 @@ def stratum(d: pd.DataFrame, train_end) -> np.ndarray:
 def select_cohort(drives: pd.DataFrame, study: dict, scale: dict) -> tuple[pd.DataFrame, dict]:
     """Choose the drives of this run and give each a split and an inverse-probability weight.
 
+    Test takes every drive first seen after train_end but only the test buckets of the older
+    ones, so the weight undoes the sampling hash and, for older test drives, the bucket.
+
     Pure function of its inputs (no I/O), so it is unit-tested directly.
     """
     split_cfg = study["split"]
@@ -174,15 +185,17 @@ def select_cohort(drives: pd.DataFrame, study: dict, scale: dict) -> tuple[pd.Da
     d = d[~is_ssd]
 
     d["bucket"] = [stable_bucket(s) for s in d["serial_number"]]
-    d["split"] = [assign_split(b, split_cfg) for b in d["bucket"]]
+    new = first_seen_after_train(d["first_date"], split_cfg)
+    d["split"] = [assign_split(b, n, split_cfg) for b, n in zip(d["bucket"], new, strict=True)]
+    lo, hi = split_cfg["test_buckets"]
+    d["split_weight"] = np.where((d["split"] == "test") & ~new, 100 / (hi - lo), 1.0)
     d["failure_date"] = d["first_failure"]
-    # A drive must be observable in its split's time window. Train/val drives need rows
-    # on or before train_end. Test drives need rows from test_start on and must not have
-    # failed before test_start (then they have no test snapshot).
-    in_train_window = d["first_date"] <= train_end
+    # A drive must be observable in its split's time window. Train/val drives have rows on
+    # or before train_end, or they would be in test. Test drives need rows from test_start
+    # on and must not have failed before test_start (then they have no test snapshot).
     in_test_window = (d["last_date"] >= test_start) & (
         d["failure_date"].isna() | (d["failure_date"] >= test_start))
-    eligible = np.where(d["split"] == "test", in_test_window, in_train_window)
+    eligible = (d["split"] != "test") | in_test_window
     counts["excluded_outside_window"] = int((~eligible).sum())
     d = d[eligible].copy()
 
@@ -191,7 +204,7 @@ def select_cohort(drives: pd.DataFrame, study: dict, scale: dict) -> tuple[pd.Da
                         scale["failing_fraction"], scale["healthy_fraction"])
     u = np.array([stable_unit(s, "sample") for s in d["serial_number"]])
     keep = u < fraction
-    d["drive_weight"] = 1.0 / fraction
+    d["drive_weight"] = d["split_weight"] / fraction
     d = d[keep]
 
     d["model"] = d["model"].fillna("unknown")

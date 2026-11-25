@@ -10,9 +10,9 @@ the same model trained without SMART.
 
 ## What it found
 
-Full-scale run of 2026-11-18, on test drives from 2024-2025. ROC-AUC measures how well a
-score ranks drives that fail within the horizon above those that don't: 0.5 is random, 1 is
-perfect.
+Full-scale run of 2026-11-18, on test drives from 2024-2025, before every drive first seen
+in 2024 or later went to the test set. ROC-AUC measures how well a score ranks drives that
+fail within the horizon above those that don't: 0.5 is random, 1 is perfect.
 
 | Fails within | With SMART | Without SMART |
 |---|---|---|
@@ -162,10 +162,13 @@ committed as `full`, which gives the results; `small` is a quick check.
   scale reuses that scan.
 - Changing the scale reruns only the steps that depend on it.
 - Sampled drives and snapshots carry weights that undo the sampling, so every scale
-  estimates the same numbers. Smaller scales give wider intervals.
+  estimates the same numbers. Older test drives also carry 1 / (test share), 5 at 20%,
+  because the test set holds every new drive but only a fifth of the older ones.
+  Smaller scales give wider intervals.
 - The `full` figures come from the 2026-11-18 run on the machine above; `small` and
-  `medium` are older. The comments in `config/sample.toml` record earlier runs on older
-  code and are out of date.
+  `medium` are older. All are from before every drive first seen after `train_end` went to
+  the test set. The comments in `config/sample.toml` record earlier runs on older code and
+  are out of date.
 - A later run reruns only the steps whose code, params or inputs changed, and those after
   them. With nothing changed it runs no step.
 
@@ -205,7 +208,7 @@ panel_download ─► panel_convert ─► dataset.parquet ─► drive_index �
 | `panel_download` | `/srv/downloads/backblaze-drive-stats/zips/` | Once only: Backblaze's 40 quarterly zips, 2016 Q1 to 2025 Q4 (28 GiB) |
 | `panel_convert` | `dataset/dataset.parquet` | Once only: their 3,653 daily CSVs to one parquet file, typed by `config/panel-schema.toml` |
 | `drive_index` | `build/drives.parquet` | Checks the dataset's sha256, then writes one row per drive |
-| `cohort` | `build/cohort.parquet` | HDDs only. Splits by drive (70/10/20) and draws the weighted sample |
+| `cohort` | `build/cohort.parquet` | HDDs only. Splits by drive (70/10/20, drives first seen after `train_end` all to test) and draws the weighted sample |
 | `extract` | `build/panel/` | The cohort's daily rows, deduplicated and cut at the first failure |
 | `snapshots` | `build/snapshots.parquet` | Sampled snapshots with trend features and right-censored labels |
 | `verify` | `build/verify-report.json` | The gate: recomputes every label and checks splits, weights, schema and leaks |

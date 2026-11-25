@@ -4,7 +4,8 @@ It reproduces the quirks the pipeline must handle: an SSD model, whitespace vari
 model name, gaps in daily reporting, same-day duplicate rows, drives that keep
 reporting after their failure, VARCHAR-typed SMART columns, capacity quirks (a day of rounded
 values, -1 on a first day, a drive that never reports one, a value that changes later), a
-model string that changes mid-life, and failures on both sides of the train/test cutoff.
+model string that changes mid-life, failures on both sides of the train/test cutoff, and
+drives first seen after it.
 Failing drives show a rising reallocated-sector count (smart_5) in their last weeks, so a
 working model must find signal.
 
@@ -22,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 START, END = date(2022, 6, 1), date(2024, 9, 30)
+NEW_FROM = date(2024, 1, 2)
 MODELS = ["ST4000DM000", "TOSHIBA MG07ACA14TA", "WDC WUH721414ALE6L4", "HGST HMS5C4040BLE640"]
 VARCHAR_COLUMNS = ["smart_22_raw", "smart_24_normalized"]
 SEAGATE_ONLY = ["smart_187_raw", "smart_187_normalized", "smart_188_raw", "smart_188_normalized"]
@@ -38,16 +40,19 @@ def silent(serial: str) -> bool:
     return int(serial[3:]) % 10 == 7
 
 
-def make_panel(columns: list[str], n_drives: int = 360, seed: int = 8) -> pd.DataFrame:
+def make_panel(columns: list[str], n_drives: int = 360, n_new: int = 60,
+               seed: int = 8) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     days = (END - START).days + 1
     rows = []
-    for i in range(n_drives):
+    for i in range(n_drives + n_new):
         serial = f"SYN{i:05d}"
         model = MODELS[i % len(MODELS)]
         if i % 50 == 3:
             model = "CT250MX500SSD1"                   # boot SSD: must be excluded
         start = int(rng.integers(0, 200))
+        if i >= n_drives:
+            start = (NEW_FROM - START).days + start // 2
         end = days - 1 - int(rng.integers(0, 60)) if rng.random() < 0.3 else days - 1
         fail_day = None
         if rng.random() < 0.3:

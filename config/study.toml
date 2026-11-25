@@ -12,7 +12,10 @@ ssd_model_pattern = 'SSD|^CT\d+MX|DELLBOSS|WDS\d|SA510|ZA\d+(?:CM|NM|GM)|MTFD|SS
 [split]
 # Drives are split by a stable sha256 bucket of the serial number (0-99), so no drive is in
 # more than one split. On top of that the split is temporal: train/val rows stop at
-# train_end, and test snapshots start at test_start.
+# train_end, and test snapshots start at test_start. A drive first seen after train_end has
+# no train/val rows, so it goes to test whatever its bucket. Test then holds every new drive
+# but only the test buckets' share of the older ones, so the older ones weigh
+# 1 / (test buckets' share) more (drive_weight).
 train_buckets = [0, 70]   # [lo, hi)
 val_buckets = [70, 80]    # early stopping, calibration and alert-threshold selection
 test_buckets = [80, 100]
