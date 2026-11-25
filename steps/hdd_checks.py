@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from common import on_stride, stable_bucket
-from drives import assign_split, stratum
+from common import load_sample, load_study, on_stride, stable_bucket
+from drives import assign_split, first_seen_after_train, select_cohort, stratum
 
 
 def stride_rows_on_stride_days(v):
@@ -38,14 +38,17 @@ def stride_rows_on_stride_days(v):
 
 
 def cohort_split_matches_stable_bucket(v):
-    """Every cohort drive, including drives without snapshots, is in its bucket's split.
+    """Every cohort drive, including drives without snapshots, is in its rule's split: its
+    bucket's, or test if it was first seen after train_end.
 
     split.rule only sees snapshot rows; this covers the whole cohort, as drives.cohort
-    assigns it.
+    assigns it. cohort_dates_match_drives pins the first dates it reads.
     """
-    cfg = {f"{s}_buckets": v.var(f"{s}_buckets") for s in ("train", "val", "test")}
+    cfg = {k: v.var(k) for k in ("train_buckets", "val_buckets", "test_buckets", "train_end")}
     cohort = v.dataset("cohort")
-    expected = [assign_split(stable_bucket(s), cfg) for s in cohort["serial_number"]]
+    new = first_seen_after_train(cohort["first_date"], cfg)
+    expected = [assign_split(stable_bucket(s), n, cfg)
+                for s, n in zip(cohort["serial_number"], new, strict=True)]
     wrong = cohort.loc[cohort["split"].to_numpy() != expected, "serial_number"]
     v.add("cohort_split_matches_stable_bucket", wrong.empty,
           f"{len(wrong)} of {len(cohort)} cohort drives in the wrong split", category="split",
@@ -53,11 +56,32 @@ def cohort_split_matches_stable_bucket(v):
           hint="The cohort step and the split rule in config/study.toml disagree.")
 
 
+def cohort_matches_drive_index(v):
+    """The cohort is the one drives.select_cohort draws from the drive index: same drives,
+    splits and weights. The other cohort checks only see the drives that are in it, so a
+    drive left out of the cohort (and of the snapshots) would pass them."""
+    want, _ = select_cohort(v.dataset("drives"), load_study(v.inputs["study"]),
+                            load_sample(v.inputs["sample"]))
+    have = v.dataset("cohort")[["serial_number", "split", "drive_weight"]]
+    m = want[["serial_number", "split", "drive_weight"]].merge(
+        have, on="serial_number", how="outer", suffixes=("", "_cohort"), indicator=True)
+    bad = m[(m["_merge"] != "both") | (m["split"] != m["split_cohort"])
+            | ~np.isclose(m["drive_weight"], m["drive_weight_cohort"], rtol=1e-12, atol=0)]
+    kinds = bad["_merge"].astype(str).map({"left_only": "missing", "right_only": "extra",
+                               "both": "split or weight"}).value_counts()
+    v.add("cohort_matches_drive_index", bad.empty,
+          f"{len(bad)} drive(s) differ from the cohort the drive index gives: "
+          f"{kinds.to_dict()}", category="split",
+          details={"drives": len(bad), "examples": sorted(bad["serial_number"])[:5]},
+          hint="The cohort is not select_cohort's output for this drive index and config.")
+
+
 def cohort_stratum_matches_rule(v):
     """Every cohort drive's stratum is what drives.stratum gives, so its weight follows.
 
-    cohort_weights_match_sampling checks drive_weight against stratum; this pins stratum
-    to the drive's failure date and split, with the rule the cohort step uses.
+    cohort_weights_match_sampling checks drive_weight against stratum, split and first date;
+    this pins stratum to the drive's failure date and split, with the rule the cohort step
+    uses.
     """
     cohort = v.dataset("cohort")
     expected = stratum(cohort, v.var("train_end"))

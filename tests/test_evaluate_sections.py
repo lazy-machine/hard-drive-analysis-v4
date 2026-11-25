@@ -7,7 +7,7 @@ import pandas as pd
 from common import stable_unit
 from evaluate import (
     Drives, _groups, alerting, full_follow_up, on_stride, seed_spread, split_seeds,
-    weekly_alerts,
+    weekly_alerts, windowed_alerts,
 )
 
 END = pd.Timestamp("2025-12-31")
@@ -98,6 +98,78 @@ def test_alerting_counts_nonfailing_drives():
     assert np.isclose(a["nonfailing_alerted_per_failing_alerted"], 1.0)
 
 
+def test_per_drive_shares_are_weighted_to_the_fleet():
+    """Failing test drives differ in weight (older 5, new 1). Three new ones alert; the older
+    one, standing for five, does not: 3 of 4 drives, but 3/8 of the fleet's."""
+    rows = [(f"new{k}", "2025-01-01", 5, 1, 0.99, "failing", "X", "V", 4) for k in range(3)]
+    rows += [("old", "2025-01-01", 5, 1, 0.1, "failing", "X", "V", 4),
+             ("p", "2025-01-01", 300, 0, 0.99, "healthy", "X", "V", 4),
+             ("q", "2025-01-01", 300, 0, 0.1, "healthy", "X", "V", 4)]
+    test = _frame(rows)
+    test.loc[test["serial_number"] == "old", ["weight", "drive_weight"]] = 5.0
+    test.loc[test["event"] == 0, ["weight", "drive_weight"]] = 6.0
+    val = _frame([(f"v{i}", "2023-01-01", 300, 0, i / 100, "healthy", "X", "V", 4)
+                  for i in range(100)])
+    D = Drives(test)
+    models = {"m": {"kind": "binary", "horizons": [30]}}
+    (a,), _ = alerting(val, test, D, models, 30, [0.05], 0.05, 5, [0, 7, 30], 5, 1)
+    assert a["failing_drives_alerted"] == 3 and a["failing_drives"] == 4
+    assert np.isclose(a["share_failing_drives_alerted"], 3 / 8)
+    assert np.isclose(a["share_failing_drives_alerted_early"], 3 / 8)
+    assert np.isclose(a["nonfailing_alerted_per_failing_alerted"], 6 / 3)
+
+    out = weekly_alerts(val, test, D, models, 30, [0.05], 1, [0.5], 5, 1, pair=("m", "m"))
+    zero = out["any_critical_counter"]
+    shares = [out["budgets"][0], out["matched"][0], out["matched_first_alert"][0]]
+    assert np.allclose([r["share_failing_drives_alerted"] for r in shares], 3 / 8)
+    assert zero["share_failing_drives_alerted"] == 1.0
+    (w,) = windowed_alerts(test, D, models, 30, 1, [0.5], 5, 1, "Q", pair=("m", "m"))["matched"]
+    assert np.isclose(w["share_failing_drives_alerted"], 3 / 8)
+
+
+def test_first_alert_lead_days_are_weighted():
+    """Caught failing drives: one weighing 5 alerted 20 days ahead, two weighing 1 alerted 2
+    days ahead. Weighted, the median lead is 20 days and 2 of 7 alerted within a week."""
+    day = "2025-01-01"
+    rows = [("old", day, 20, 1, 0.99, "failing", "X", "V", 4),
+            ("new1", day, 2, 1, 0.99, "failing", "X", "V", 4),
+            ("new2", day, 2, 1, 0.99, "failing", "X", "V", 4),
+            ("q1", day, 300, 0, 0.1, "healthy", "X", "V", 4),
+            ("q2", day, 300, 0, 0.1, "healthy", "X", "V", 4)]
+    test = _frame(rows)
+    test.loc[test["serial_number"] == "old", ["weight", "drive_weight"]] = 5.0
+    val = _frame([(f"v{i}", "2023-01-01", 300, 0, i / 100, "healthy", "X", "V", 4)
+                  for i in range(100)])
+    models = {"m": {"kind": "binary", "horizons": [7]}}
+    test["m__p7"] = test["s"]
+    val["m__p7"] = val["s"]
+    out = weekly_alerts(val, test, Drives(test), models, 7, [0.05], 1, [0.5], 5, 1,
+                        pair=("m", "m"))
+    (r,) = out["matched_first_alert"]
+    assert r["share_failing_drives_alerted"] == 1.0
+    assert r["first_alert_lead_days_quartiles"] == [2.0, 20.0, 20.0]
+    assert np.isclose(r["share_caught_first_alerted_within_horizon"], 2 / 7)
+
+
+def test_bootstrap_pools_older_and_new_drives_of_a_stratum():
+    """New failing drives are all alerted, older ones none. Resampling within each weight
+    would fix that mix and give a zero-width interval; pooling within the stratum does not."""
+    rows = [(f"new{k}", "2025-01-01", 5, 1, 0.99, "failing", "X", "V", 4) for k in range(6)]
+    rows += [(f"old{k}", "2025-01-01", 5, 1, 0.1, "failing", "X", "V", 4) for k in range(6)]
+    rows += [(f"h{k}", "2025-01-01", 300, 0, 0.1, "healthy", "X", "V", 4) for k in range(6)]
+    test = _frame(rows)
+    test.loc[test["serial_number"].str.startswith("old"), ["weight", "drive_weight"]] = 5.0
+    val = _frame([(f"v{i}", "2023-01-01", 300, 0, i / 100, "healthy", "X", "V", 4)
+                  for i in range(100)])
+    D = Drives(test)
+    assert set(D.strata) == {"failing", "healthy"}
+    models = {"m": {"kind": "binary", "horizons": [30]}}
+    (a,), _ = alerting(val, test, D, models, 30, [0.05], 0.05, 5, [0, 7, 30], 50, 1)
+    assert np.isclose(a["share_failing_drives_alerted"], 6 / 36)
+    lo, hi = a["share_failing_drives_alerted_ci"]
+    assert lo < 6 / 36 < hi
+
+
 def test_groups_split_the_firmware_model_from_its_vendor():
     day = "2025-01-01"
     test = _frame([("a", day, 5, 1, 0.9, "failing", "TOSHIBA MG08ACA16TEY", "Toshiba", 16),
@@ -170,7 +242,6 @@ def test_weekly_alerts_use_only_stride_days():
 
 
 def test_windowed_alerts_count_drive_quarters():
-    from evaluate import windowed_alerts
     rows = []
     # non-failing drive N1: alerts only in Q1; N2 never alerts; both seen in Q1 and Q2
     for d in pd.date_range("2025-01-01", "2025-06-30"):

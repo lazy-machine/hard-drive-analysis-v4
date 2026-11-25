@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 
 from ..core import (
-    check, examples, failed, fmt, frac, jsonable, passed, row_hashes, skipped, value_set,
-    value_texts,
+    check, examples, failed, fmt, frac, jsonable, passed, read_table, row_hashes, skipped,
+    to_datetime, value_set, value_texts,
 )
 
 
@@ -113,13 +113,24 @@ def rule(v, opt):
     """Recomputes each row's split from params.split_rule and compares. Methods: a stable hash
     (sha256/sha1/md5 of template.format(key), first 8 bytes as a fraction, times modulo,
     then [lo, hi) buckets per split), `modulo` (integer key % modulo), or explicit `values`
-    lists. Proves the split is deterministic and was not hand-edited."""
+    lists. With `override`, a key whose date in another input is later than `after` belongs
+    to the override's split instead of its bucket's; a key without a date there is in the
+    wrong split. Proves the split is deterministic and was not hand-edited."""
     r = v.spec.split_rule
     if not r:
         return skipped("no params.split_rule")
     key = r["key"]
     if not v.has(key):
         return failed(f"split_rule.key '{key}' missing in some split")
+    over, when = r.get("override"), None
+    if over:
+        d = read_table(v.inputs[over["dataset"]], v.spec.allow_pickle)
+        if missing := [c for c in (key, over["column"]) if c not in d.columns]:
+            return failed(f"split_rule.override: '{over['dataset']}' lacks column(s) {missing}")
+        when = pd.Series(to_datetime(d[over["column"]]).to_numpy(), index=d[key].astype("string"))
+        if when.index.has_duplicates:
+            return failed(f"split_rule.override: '{over['dataset']}' repeats some {key}")
+        after = v.time_value(over["after"], False, "split_rule.override.after")
     wrong, checked, examples_ = {}, 0, []
     for name, d in v.splits.items():
         keys = d[key].drop_duplicates()
@@ -128,12 +139,12 @@ def rule(v, opt):
             allowed_vals = value_set(r["values"].get(name, []), keys)
             bad = ~value_texts(keys).isin(allowed_vals).to_numpy()
         else:
-            if name not in r["buckets"]:
-                wrong[name] = len(keys)
-                continue
-            lo, hi = r["buckets"][name]
+            lo, hi = r["buckets"].get(name, (0, 0))
             b = _bucket(keys, r)
             bad = ~((b >= lo) & (b < hi))
+            if over:
+                t = when.reindex(keys.astype("string"))
+                bad = np.where(t > after, name != over["split"], bad) | t.isna().to_numpy()
         if bad.any():
             wrong[name] = int(bad.sum())
             examples_ += examples(keys[bad], 3)

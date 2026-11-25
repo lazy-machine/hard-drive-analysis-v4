@@ -39,18 +39,41 @@ def test_cohort_rules():
     # test-bucket drive that failed before test_start has nothing to test
     early = next(s for s in (f"E{i}" for i in range(1000)) if stable_bucket(s) >= 80)
     rows.append((early, "ST4000DM000", "2020-01-01", "2023-06-01", "2023-06-01", 4e12))
-    # train-bucket drive that only appears after train_end
-    late = next(s for s in (f"L{i}" for i in range(1000)) if stable_bucket(s) < 70)
-    rows.append((late, "ST4000DM000", "2024-03-01", "2025-12-31", None, 4e12))
+    # drives first seen on train_end (older) and the day after it (new), in every bucket
+    for prefix, first in (("O", "2023-12-31"), ("N", "2024-01-01")):
+        rows += [(f"{prefix}{i}", "ST4000DM000", first, "2025-12-31", None, 4e12)
+                 for i in range(100)]
     cohort, counts = select_cohort(drives_frame(rows), STUDY, SCALE)
 
     assert "SSD1" not in set(cohort["serial_number"])
     assert early not in set(cohort["serial_number"])
-    assert late not in set(cohort["serial_number"])
-    assert counts["excluded_ssd"] == 1 and counts["excluded_outside_window"] == 2
+    assert counts["excluded_ssd"] == 1 and counts["excluded_outside_window"] == 1
+    assert cohort["serial_number"].is_unique
     expected = {"train": range(0, 70), "val": range(70, 80), "test": range(80, 100)}
-    for s, split in zip(cohort["serial_number"], cohort["split"], strict=True):
-        assert stable_bucket(s) in expected[split]
+    for s, split, w in zip(cohort["serial_number"], cohort["split"], cohort["drive_weight"],
+                           strict=True):
+        if s.startswith("N"):
+            assert (split, w) == ("test", 1.0)
+        else:
+            assert stable_bucket(s) in expected[split]
+            assert w == (5.0 if split == "test" else 1.0)
+
+
+@pytest.mark.parametrize("test_buckets", [[80, 100], [90, 100]])
+def test_weighted_test_set_estimates_the_fleet(test_buckets):
+    """Weights of the sampled test drives add up to the fleet, older and new, per stratum."""
+    study = {**STUDY, "split": {**STUDY["split"], "test_buckets": test_buckets,
+                                "val_buckets": [70, test_buckets[0]]}}
+    rows = [(f"{age}{i}", "ST4000DM000", first, "2025-12-31",
+             "2025-05-05" if i % 4 == 0 else None, 4e12)
+            for age, first in (("O", "2020-01-01"), ("N", "2024-06-01")) for i in range(20000)]
+    scale = dict(SCALE, failing_fraction=0.8, healthy_fraction=0.4)
+    cohort, _ = select_cohort(drives_frame(rows), study, scale)
+    test = cohort[cohort["split"] == "test"]
+    total = test.groupby([test["serial_number"].str[0], "stratum"])["drive_weight"].sum()
+    for age in "ON":
+        assert total[age, "failing"] == pytest.approx(5000, rel=0.1)
+        assert total[age, "healthy"] == pytest.approx(15000, rel=0.1)
 
 
 def test_sampling_weights_are_inverse_fractions():
@@ -58,7 +81,7 @@ def test_sampling_weights_are_inverse_fractions():
              "2021-05-05" if i % 3 == 0 else None, 4e12) for i in range(3000)]
     scale = dict(SCALE, failing_fraction=0.5, healthy_fraction=0.1)
     cohort, _ = select_cohort(drives_frame(rows), STUDY, scale)
-    w = cohort.groupby("stratum")["drive_weight"].unique()
+    w = cohort[cohort["split"] != "test"].groupby("stratum")["drive_weight"].unique()
     assert list(w["failing"]) == [2.0] and list(w["healthy"]) == [10.0]
     kept_healthy = (cohort["stratum"] == "healthy").sum()
     assert 140 < kept_healthy < 260  # about 10% of 2000
@@ -85,7 +108,7 @@ def test_failure_after_train_end_does_not_pick_train_drives():
     assert (trainval(early)["stratum"] == "failing").all()
     test = late[late["split"] == "test"]
     assert len(test) == len(serials) - n_trainval
-    assert (test["stratum"] == "failing").all() and (test["drive_weight"] == 1.0).all()
+    assert (test["stratum"] == "failing").all() and (test["drive_weight"] == 5.0).all()
 
 
 def test_contract_validation(tmp_path):
@@ -267,6 +290,101 @@ def test_gate_catches_cohort_drive_in_wrong_split(pipeline_run, tmp_path):
                           ELSE split END AS split)
         FROM cohort""")
     assert "custom.cohort_split_matches_stable_bucket" in blocking
+
+
+def test_new_drives_are_all_in_test(pipeline_run):
+    project, _ = pipeline_run
+    cohort = f"read_parquet('{project}/build/cohort.parquet')"
+    counts = duckdb.sql(f"""SELECT split, count(*), count(*) FILTER (WHERE bucket < 80),
+                                   count(*) FILTER (WHERE failure_date IS NOT NULL)
+                            FROM {cohort} WHERE first_date > DATE '2023-12-31'
+                            GROUP BY split""").fetchall()
+    assert [c[0] for c in counts] == ["test"]
+    assert all(n > 0 for n in counts[0][1:]), "synthetic data should contain such drives"
+
+
+def test_gate_catches_new_train_bucket_drive_left_in_train(pipeline_run, tmp_path):
+    """The old rule's split for a drive first seen after train_end, in cohort and snapshots."""
+    project, _ = pipeline_run
+    cohort = f"read_parquet('{project}/build/cohort.parquet')"
+    swap = (f"SELECT * REPLACE (CASE WHEN serial_number = (SELECT min(serial_number) FROM {cohort} "
+            "WHERE first_date > DATE '2023-12-31' AND bucket < 70) "
+            "THEN 'train' ELSE split END AS split) FROM ")
+    blocking = _gate_on(project, tmp_path, snapshots_sql=swap + "snapshots",
+                        cohort_sql=swap + "cohort")
+    assert {"split.rule", "custom.cohort_split_matches_stable_bucket",
+            "custom.cohort_matches_drive_index"} <= blocking
+    assert "assert.snapshot_split_matches_cohort" not in blocking
+
+
+def test_gate_catches_new_drives_left_out(pipeline_run, tmp_path):
+    """The old rule's cohort: new train/val-bucket drives dropped from cohort and snapshots.
+    Every check that reads only the cohort's drives passes; the drive index catches it."""
+    project, _ = pipeline_run
+    cohort = f"read_parquet('{project}/build/cohort.parquet')"
+    new = (f"serial_number NOT IN (SELECT serial_number FROM {cohort} "
+           "WHERE first_date > DATE '2023-12-31' AND bucket < 80)")
+    blocking = _gate_on(project, tmp_path, cohort_sql=f"SELECT * FROM cohort WHERE {new}",
+                        snapshots_sql=f"SELECT * FROM snapshots WHERE {new}")
+    assert blocking == {"custom.cohort_matches_drive_index"}
+
+
+def test_gate_catches_extra_cohort_drive(pipeline_run, tmp_path):
+    """A drive the sample did not pick, added to the cohort with its drive-index dates."""
+    project, _ = pipeline_run
+    build = project / "build"
+    serial = duckdb.sql(f"""SELECT min(serial_number) FROM read_parquet('{build}/drives.parquet')
+                            WHERE model NOT LIKE '%SSD%' AND serial_number NOT IN
+                            (SELECT serial_number FROM read_parquet('{build}/cohort.parquet'))
+                         """).fetchall()[0][0]
+    blocking = _gate_on(project, tmp_path, cohort_sql=f"""
+        SELECT * FROM cohort UNION ALL
+        SELECT * REPLACE ('{serial}' AS serial_number) FROM cohort
+        WHERE serial_number = (SELECT min(serial_number) FROM cohort)""")
+    assert "custom.cohort_matches_drive_index" in blocking
+
+
+@pytest.mark.parametrize("which,factor", [
+    ("split = 'test' AND first_date <= DATE '2023-12-31'", 1 / 5),   # older, without the factor
+    ("split = 'test' AND first_date > DATE '2023-12-31'", 5),        # new, with the factor
+    ("split = 'train'", 5),
+])
+def test_gate_catches_wrong_test_share_factor(pipeline_run, tmp_path, which, factor):
+    project, _ = pipeline_run
+    cohort = f"read_parquet('{project}/build/cohort.parquet')"
+    drive = f"(SELECT min(serial_number) FROM {cohort} WHERE {which})"
+    scaled = ("SELECT * REPLACE (CASE WHEN serial_number = {d} THEN {c} * {f} ELSE {c} END "
+              "AS {c}) FROM {t}")
+    blocking = _gate_on(
+        project, tmp_path,
+        cohort_sql=scaled.format(d=drive, c="drive_weight", f=factor, t="cohort"),
+        snapshots_sql=scaled.format(d=drive, c="weight", f=factor, t="snapshots"))
+    assert blocking == {"assert.cohort_weights_match_sampling",
+                        "custom.cohort_matches_drive_index"}
+
+
+@pytest.mark.parametrize("op,split,first_date", [
+    ("<=", "test", "2024-01-01"),       # older train-bucket drive passed off as new
+    (">", "train", "2023-12-31"),       # new train-bucket drive passed off as older
+])
+def test_gate_split_rule_reads_first_dates_from_drives(pipeline_run, tmp_path, op, split,
+                                                       first_date):
+    """A forged cohort first date moves the split with it: split.rule and the date check hold."""
+    project, _ = pipeline_run
+    cohort = f"read_parquet('{project}/build/cohort.parquet')"
+    drive = (f"(SELECT min(serial_number) FROM {cohort} "
+             f"WHERE bucket < 70 AND first_date {op} DATE '2023-12-31')")
+    blocking = _gate_on(
+        project, tmp_path,
+        cohort_sql=f"""SELECT * REPLACE (
+            CASE WHEN serial_number = {drive} THEN '{split}' ELSE split END AS split,
+            CASE WHEN serial_number = {drive} THEN DATE '{first_date}'
+                 ELSE first_date END AS first_date) FROM cohort""",
+        snapshots_sql=f"""SELECT * REPLACE (
+            CASE WHEN serial_number = {drive} THEN '{split}' ELSE split END AS split)
+            FROM snapshots""")
+    assert {"split.rule", "assert.cohort_dates_match_drives"} <= blocking
+    assert "custom.cohort_split_matches_stable_bucket" not in blocking
 
 
 def _dense_rows(project):

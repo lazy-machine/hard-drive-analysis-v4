@@ -117,6 +117,37 @@ def test_split_rule(case, splits):
     assert r.failed("split.rule")
 
 
+def test_split_rule_override(case, splits):
+    """Keys dated after `after` belong to the override's split; the others to their bucket's."""
+    keys = sorted(pd.concat(splits.values())["customer"].unique())
+    late = set(keys[::5])
+    for name in ("train", "val"):
+        moved = splits[name]["customer"].isin(late)
+        splits["test"] = pd.concat([splits["test"], splits[name][moved]])
+        splits[name] = splits[name][~moved]
+    starts = pd.DataFrame({"customer": keys, "start": [
+        "2024-01-01" if k in late else "2023-12-31" for k in keys]})
+    rule = {"key": "customer", "method": "sha256", "template": "split:{key}",
+            "buckets": {"train": [0, 70], "val": [70, 80], "test": [80, 100]},
+            "override": {"split": "test", "dataset": "starts", "column": "start",
+                         "after": "2023-12-31"}}
+
+    def failed(starts, frames=splits):
+        extra = case.write({"starts": starts})
+        return case.run(frames, {"split_rule": rule}, extra).failed("split.rule")
+
+    assert not failed(starts)
+    in_test = splits["test"]["customer"]
+    for wrong in (in_test.isin(late) & (in_test.map(bucket) < 70),     # new, left in train
+                  ~in_test.isin(late)):                                # old, moved to train
+        one = in_test == in_test[wrong].iloc[0]
+        assert failed(starts, {**splits, "test": splits["test"][~one],
+                               "train": pd.concat([splits["train"], splits["test"][one]])})
+    assert failed(starts[starts["customer"] != splits["train"]["customer"].iloc[0]])
+    assert failed(pd.concat([starts, starts.head(1)]))
+    assert failed(starts.rename(columns={"start": "begin"}))
+
+
 def test_split_ratios(case, splits):
     r = case.run(splits, {"split_ratios": {"train": 0.5, "val": 0.25, "test": 0.25}})
     assert r.failed("split.ratios") and r.check("split.ratios")["severity"] == "warn"
@@ -1010,6 +1041,18 @@ BASE_FEATS = ["f1", "f2", "f3", "f4", "plan", "region"]
     ({"assert": [{"name": "money", "sql": "SELECT * FROM train WHERE f1 > $100"}]},
      r"write \$\$ for a literal"),
     ({"assert": [{"name": "spaced", "expr": "unit price > 0"}]}, "backticks"),
+    ({"split_rule": {"key": "customer", "buckets": {"train": [0, 100]}, "override": {
+        "split": "test", "dataset": "nope", "column": "d", "after": "2024-01-01"}}},
+     "'nope' is not an input"),
+    ({"split_rule": {"key": "customer", "buckets": {"train": [0, 100]}, "override": {
+        "split": ["train"], "dataset": "train", "column": "date", "after": "2024-01-01"}}},
+     "must be strings"),
+    ({"split_rule": {"key": "customer", "buckets": {"train": [0, 100]}, "override": {
+        "split": "train", "dataset": "train", "column": "date", "after": "NaT"}}},
+     "must be a date"),
+    ({"split_rule": {"key": "customer", "buckets": {"train": [0, 100]}, "override": {
+        "split": "test", "dataset": "train", "column": "date", "after": "2024-01-01"}}},
+     "not in split_rule.buckets"),
 ])
 def test_config_errors_are_helpful(case, splits, bad, match):
     from data_verify import SpecError

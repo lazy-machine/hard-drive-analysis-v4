@@ -377,7 +377,8 @@ def _results(metrics, cohort, gate, preds, ref, labels) -> list[str]:
         ["validation snapshots", span("val")],
         ["test snapshots", span("test")],
         ["test set", f"{test['drives']} drives, {test['failing_drives']} fail "
-                     f"({test.get('silent_failing_drives', 'n/a')} silent), "
+                     f"({test.get('silent_failing_drives', 'n/a')} silent, "
+                     f"{_pct(test.get('silent_failing_share'), 1)} of failing drives, weighted), "
                      f"{test['snapshots']} snapshots"],
         ["reference model", _label(ref, labels)],
         ["compared with", f"{len(trained)} models and baselines (rows of the tables below)"],
@@ -426,7 +427,8 @@ def _results(metrics, cohort, gate, preds, ref, labels) -> list[str]:
                   f"> The threshold is set on validation drives so that {_pct(main['budget'], 1)} "
                   "of healthy drive-days alert. On test, false alarms above the budget mean "
                   f"drift. Precision = share of alerted drive-days that fail within "
-                  f"{main['horizon']} days.", ""]
+                  f"{main['horizon']} days. Failing drives: sampled drives, and their share "
+                  "weighted to the fleet.", ""]
         lines += table(
             ["model", "false alarms (test)", "precision",
              f"failing drives alerted in their last {main['horizon']} d",
@@ -434,8 +436,7 @@ def _results(metrics, cohort, gate, preds, ref, labels) -> list[str]:
             [[_label(a["model"], labels),
               est(a["false_alarm_rate_test"], a.get("false_alarm_rate_test_ci"), 2, pct=True),
               est(a["precision_test"], a.get("precision_test_ci"), 2, pct=True),
-              f"{a['failing_drives_alerted']}/{a['failing_drives']}",
-              f"{a.get('failing_drives_alerted_early', 'n/a')}/{a['failing_drives']}"]
+              _alerted_drives(a, ""), _alerted_drives(a, "_early")]
              for a in rows])
 
     life = next((r for r in metrics["life"] if r["model"] == ref), None)
@@ -674,6 +675,13 @@ def _life(metrics, life_table, ref, labels) -> list[str]:
     return lines
 
 
+def _alerted_drives(a, early: str) -> str:
+    """'caught/failing' sampled drives, then their weighted share. early: "" or "_early"."""
+    key = f"share_failing_drives_alerted{early}"
+    return (f"{a[f'failing_drives_alerted{early}']}/{a['failing_drives']}, "
+            + est(a[key], a[f"{key}_ci"], 0, pct=True))
+
+
 def _alerting(metrics, ref, labels) -> list[str]:
     main = _main_alert(metrics, ref)
     if not main:
@@ -692,7 +700,8 @@ def _alerting(metrics, ref, labels) -> list[str]:
              f"counts alerts whose outcome at {main['horizon']} days is known, and the alerts "
              "that cannot be judged yet (panel end) are shown separately and, in the next "
              "column, counted as false. Failing drives alerted = drives failing in the test "
-             f"period that get at least one alert in their last {main['horizon']} days.", ""]
+             f"period that get at least one alert in their last {main['horizon']} days: "
+             "sampled drives, and their share weighted to the fleet.", ""]
     lines += table(
         ["budget", "model", "false alarms, test (share of healthy drive-days)",
          "precision (per alerted drive-day)", "alerts with unknown outcome",
@@ -704,10 +713,7 @@ def _alerting(metrics, ref, labels) -> list[str]:
           _pct(a.get("unknown_alert_share"), 1),
           est(a.get("precision_unknown_as_false"), a.get("precision_unknown_as_false_ci"), 2,
               pct=True),
-          f"{a['failing_drives_alerted']}/{a['failing_drives']}, "
-          + est(a.get("share_failing_drives_alerted"),
-                a.get("share_failing_drives_alerted_ci"), 0, pct=True),
-          f"{a.get('failing_drives_alerted_early', 'n/a')}/{a['failing_drives']}"]
+          _alerted_drives(a, ""), _alerted_drives(a, "_early")]
          for a in rows])
     over = [a for a in rows if a["budget"] == main["budget"]
             and side(a.get("false_alarm_rate_test_ci"), a["budget"]) > 0]
@@ -773,7 +779,8 @@ def _alerting(metrics, ref, labels) -> list[str]:
                       "period; a failing drive "
                       f"({weekly.get('failing_drives_any_lead', '?')}) is caught if any weekly "
                       "check before its failure alerts. Thresholds set on test for each share; "
-                      "lead = days from the first alert to the failure (quartiles).", ""]
+                      "lead = days from the first alert to the failure (quartiles). All shares and "
+                      "the lead days are weighted to the fleet.", ""]
             lines += table(["non-failing drives alerted", "model", "failing drives caught",
                             "difference vs the rule (paired)", "lead days (25/50/75%)",
                             f"first alert within {main['horizon']} days"],
@@ -1073,7 +1080,9 @@ def _answer(disc, gains, metrics, ref, labels, tolerance) -> list[str]:
             out.append(
                 f"- **Silent failures** (no critical counter above zero in any test "
                 f"snapshot): {metrics['test']['silent_failing_drives']} of the "
-                f"{metrics['test']['failing_drives']} failing test drives. On them the "
+                f"{metrics['test']['failing_drives']} sampled failing test drives, "
+                f"{_pct(metrics['test'].get('silent_failing_share'), 1)} of them weighted to "
+                "the fleet. On them the "
                 f"{H}-day ROC-AUC of {_label(ref, labels)} is "
                 f"{est(s['auc'], s['auc_ci'])} against {est(o['auc'], o['auc_ci'])} overall: "
                 f"{verdict}.")

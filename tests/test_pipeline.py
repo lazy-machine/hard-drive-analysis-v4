@@ -27,6 +27,22 @@ def test_pipeline_runs_and_caches(pipeline_run):
     assert {o.status for o in again.outcomes.values()} == {"cached", "kept"}
 
 
+def test_silent_failing_share_is_weighted(pipeline_run):
+    project, _ = pipeline_run
+    build = project / "build"
+    drives = duckdb.sql(f"""
+        SELECT c.drive_weight, bool_or(p.critical_nonzero) AS warned
+        FROM read_parquet('{build}/predictions.parquet') p
+        JOIN read_parquet('{build}/cohort.parquet') c USING (serial_number)
+        WHERE p.split = 'test' GROUP BY p.serial_number, c.drive_weight
+        HAVING bool_or(p.event = 1)""").df()
+    assert drives["drive_weight"].nunique() > 1, "synthetic data should mix older and new drives"
+    w = drives["drive_weight"]
+    metrics = json.loads((build / "metrics.json").read_text())["test"]
+    assert metrics["silent_failing_drives"] == (~drives["warned"]).sum()
+    assert abs(metrics["silent_failing_share"] - w[~drives["warned"]].sum() / w.sum()) < 1e-12
+
+
 def test_gate_passed(pipeline_run):
     project, _ = pipeline_run
     report = json.loads((project / "build" / "verify-report.json").read_text())
