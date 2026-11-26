@@ -319,9 +319,10 @@ watch = ["steps/common.py", "steps/metrics.py", "steps/survival.py"]
 # include / exclude: glob patterns added to or removed from the feature group (ablations).
 # early_stopping_rounds: rounds without a better validation loss before training stops.
 # Each model's value sits above the longest such stretch before its best iteration,
-# replayed tree by tree from the 2026-10-28 full-scale models (smart 90, nosmart 90,
-# binary_30d 50, nocritical 28, usage 20, w075 6, w100 4 rounds). So training stops at
-# the same best iteration, with the same trees, without up to 80 extra rounds after it.
+# replayed tree by tree from the 2026-11-25 full-scale models, seed replicates included
+# (smart 83, nosmart 52, binary_30d 48, nocritical 13, usage 26, w075 39, w100 12 rounds).
+# So training stops at the same best iteration, with the same trees, without many extra
+# rounds after it.
 # smart and nosmart keep 100 on purpose: a uniform 50 stops them early and moved test
 # scores by up to 0.017 (checked). Recheck the stretches if the data or features change.
 # histogram: "col" (default, low memory) or "row" (about 1.6x faster per round, about

@@ -15,20 +15,21 @@
 # Changing the scale reruns cohort and everything downstream. drive_index (the
 # full-panel scan) does not read this file, so it stays cached.
 
-# Committed as "full", the scale the results come from (about 2 hours, 32 GB machine).
+# Committed as "full", the scale the results come from (about 1 h 45 min, 32 GB machine).
 # Set "small" for a quick check that finishes in minutes.
 scale = "full"
 
 [scales.small]
-# Runs in a few minutes on a 15 GB laptop once drive_index is cached.
+# 663 failing and 1,805 healthy drives. Runs in a few minutes on a 15 GB laptop once
+# drive_index is cached (timed on older code).
 failing_fraction = 0.04
 healthy_fraction = 0.004
 stride_days = 7
 dense_days = 60
 
 [scales.medium]
-# 3,119 failing and 7,308 healthy drives, before test got the drives first seen after
-# train_end. Measured before the stratum used train_end, with 4,394 failing and 7,181
+# 3,265 failing and 8,868 healthy drives. Measured before test got the drives first seen
+# after train_end and before the stratum used train_end, with 4,394 failing and 7,181
 # healthy: ~8 min on a 15 GB box once drive_index is cached, 1.74M train+val snapshots, 4.0
 # GiB training estimate.
 failing_fraction = 0.2
@@ -38,13 +39,12 @@ dense_days = 90
 
 [scales.full]
 # Every failing HDD plus a 10% weighted sample of healthy ones (a train/val drive failing
-# after train_end is healthy here). Sized for a 31 GB machine. 15,776 failing and 35,729
-# healthy drives, before test got the drives first seen after train_end. Measured there
-# on 2026-10-24, before the stratum used train_end, with 22,230 failing and 35,079
-# healthy: 8.7M train+val snapshots, 55M survival rows (48.2M train), 17.8 GiB training
-# estimate with 23 GiB available (about 3 GiB under the memory guard), ~30 min end to
-# end. Healthy drives are subsampled even here: the full daily panel expanded into
-# survival rows would need several hundred GB.
+# after train_end is healthy here). Sized for a 31 GB machine. Measured on 2026-11-25:
+# 16,468 failing and 43,416 healthy drives, 7.6M train+val snapshots, 47.7M survival rows
+# (41.8M train), 10.1 GiB training estimate against a 22 to 23 GiB memory-guard budget
+# (about 12 GiB of headroom), 1 h 42 min end to end including drive_index. Healthy drives
+# are subsampled even here: the full daily panel expanded into survival rows would need
+# several hundred GB.
 failing_fraction = 1.0
 healthy_fraction = 0.1
 stride_days = 7

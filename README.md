@@ -10,15 +10,15 @@ the same model trained without SMART.
 
 ## What it found
 
-Full-scale run of 2026-11-18, on test drives from 2024-2025, before every drive first seen
-in 2024 or later went to the test set. ROC-AUC measures how well a score ranks drives that
+Full-scale run of 2026-11-25, on test drives from 2024-2025: every drive first seen in 2024
+or later, and a fifth of the older ones. ROC-AUC measures how well a score ranks drives that
 fail within the horizon above those that don't: 0.5 is random, 1 is perfect.
 
 | Fails within | With SMART | Without SMART |
 |---|---|---|
-| 7 days | 0.905 | 0.603 |
-| 30 days | 0.877 | 0.603 |
-| 365 days | 0.787 | 0.585 |
+| 7 days | 0.908 | 0.608 |
+| 30 days | 0.881 | 0.604 |
+| 365 days | 0.797 | 0.589 |
 
 The positives include the snapshot taken on the failure day itself, so the 7-day number
 partly measures whether a drive is failing that day. `analysis.md`, "Where the signal comes
@@ -27,7 +27,7 @@ from", gives the AUC on positives at least 7 days before the failure (30 days an
 - SMART carries real failure signal, strongest close to the failure.
 - Failures are rare (about 0.1% of drive-days fail within 30 days), so most alerts are still
   false alarms. With the alert threshold set on validation drives to flag 1% of healthy
-  drive-days, 3.8% of the flagged test drive-days with a known 30-day outcome end in a
+  drive-days, 3.5% of the flagged test drive-days with a known 30-day outcome end in a
   failure.
 - The model seldom names a failure day months ahead.
 
@@ -156,7 +156,7 @@ committed as `full`, which gives the results; `small` is a quick check.
 |---|---|---|---|
 | small | 4% / 0.4% | ~7 min | any machine |
 | medium | 20% / 2% | ~22 min | 3.7 GiB training estimate |
-| full | 100% / 10% | ~105 min | 11.4 GiB training estimate |
+| full | 100% / 10% | ~98 min | 10.1 GiB training estimate |
 
 - The first run also scans the whole panel once (`drive_index`, about 5 minutes). Every
   scale reuses that scan.
@@ -165,10 +165,9 @@ committed as `full`, which gives the results; `small` is a quick check.
   estimates the same numbers. Older test drives also carry 1 / (test share), 5 at 20%,
   because the test set holds every new drive but only a fifth of the older ones.
   Smaller scales give wider intervals.
-- The `full` figures come from the 2026-11-18 run on the machine above; `small` and
-  `medium` are older. All are from before every drive first seen after `train_end` went to
-  the test set. The comments in `config/sample.toml` record earlier runs on older code and
-  are out of date.
+- The `full` figures come from the 2026-11-25 run on the machine above. The `small` and
+  `medium` figures are older, from before every drive first seen after `train_end` went to
+  the test set. `config/sample.toml` gives each scale's drive counts.
 - A later run reruns only the steps whose code, params or inputs changed, and those after
   them. With nothing changed it runs no step.
 
