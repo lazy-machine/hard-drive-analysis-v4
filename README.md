@@ -10,9 +10,10 @@ the same model trained without SMART.
 
 ## What it found
 
-Full-scale run of 2026-11-25, on test drives from 2024-2025: every drive first seen in 2024
-or later, and a fifth of the older ones. ROC-AUC measures how well a score ranks drives that
-fail within the horizon above those that don't: 0.5 is random, 1 is perfect.
+Full-scale run of 2026-11-25, on test snapshots from 2024-2025. Before sampling, every drive
+first seen in 2024 or later is assigned to test, and so are the older drives in the 20% test
+buckets. ROC-AUC measures how well a score ranks drives that fail within the horizon above
+those that don't: 0.5 is random, 1 is perfect.
 
 | Fails within | With SMART | Without SMART |
 |---|---|---|
@@ -25,10 +26,10 @@ partly measures whether a drive is failing that day. `analysis.md`, "Where the s
 from", gives the AUC on positives at least 7 days before the failure (30 days and longer).
 
 - SMART carries real failure signal, strongest close to the failure.
-- Failures are rare (about 0.1% of drive-days fail within 30 days), so most alerts are still
+- Failures are rare (about 0.12% of drive-days fail within 30 days), so most alerts are still
   false alarms. With the alert threshold set on validation drives to flag 1% of healthy
   drive-days, 3.5% of the flagged test drive-days with a known 30-day outcome end in a
-  failure.
+  failure, both shares weighted to the fleet.
 - The model seldom names a failure day months ahead.
 
 A run writes the full numbers to `build/report/results.md` and the explanation to
@@ -43,7 +44,7 @@ A run writes the full numbers to `build/report/results.md` and the explanation t
 | System library | GNU OpenMP (`libgomp.so.1`), which LightGBM loads. Most desktops have it; on a minimal Debian or Ubuntu: `sudo apt install libgomp1` |
 | Memory | 16 GB for `small` and `medium`, a 32 GB machine for `full` |
 | Disk | About 90 GiB to build the panel (28 GiB of zips kept, 60 GiB free for scratch), 30 GiB for the panel, 2 GiB for `build/` |
-| Time | About 3 hours to build the panel once, then 15 minutes (`small`) to under 2 hours (`full`) per run |
+| Time | About 3 hours to build the panel once, then about 5 minutes for the first panel scan and 4 minutes (`small`) to under 2 hours (`full`) per run |
 
 Times in this file were measured on a 16-thread machine with 31 GB of memory, an SSD for the
 project and an HDD for the downloads.
@@ -154,8 +155,8 @@ committed as `full`, which gives the results; `small` is a quick check.
 
 | Scale | Drives kept (failing / healthy) | Time after `drive_index` | Memory |
 |---|---|---|---|
-| small | 4% / 0.4% | ~7 min | any machine |
-| medium | 20% / 2% | ~22 min | 3.7 GiB training estimate |
+| small | 4% / 0.4% | ~4 min | 0.9 GiB training estimate |
+| medium | 20% / 2% | ~13 min | 2.4 GiB training estimate |
 | full | 100% / 10% | ~98 min | 10.1 GiB training estimate |
 
 - The first run also scans the whole panel once (`drive_index`, about 5 minutes). Every
@@ -163,11 +164,12 @@ committed as `full`, which gives the results; `small` is a quick check.
 - Changing the scale reruns only the steps that depend on it.
 - Sampled drives and snapshots carry weights that undo the sampling, so every scale
   estimates the same numbers. Older test drives also carry 1 / (test share), 5 at 20%,
-  because the test set holds every new drive but only a fifth of the older ones.
+  because before sampling every new drive is assigned to test, but of the older drives
+  only those in the 20% test buckets are.
   Smaller scales give wider intervals.
-- The `full` figures come from the 2026-11-25 run on the machine above. The `small` and
-  `medium` figures are older, from before every drive first seen after `train_end` went to
-  the test set. `config/sample.toml` gives each scale's drive counts.
+- The `full` figures come from the 2026-11-25 run on the machine above, `small` and
+  `medium` from runs of 2026-11-26 on the same machine and code. `config/sample.toml` gives
+  each scale's drive and snapshot counts.
 - A later run reruns only the steps whose code, params or inputs changed, and those after
   them. With nothing changed it runs no step.
 

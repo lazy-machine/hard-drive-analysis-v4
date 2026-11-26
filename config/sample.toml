@@ -20,18 +20,18 @@
 scale = "full"
 
 [scales.small]
-# 663 failing and 1,805 healthy drives. Runs in a few minutes on a 15 GB laptop once
-# drive_index is cached (timed on older code).
+# Measured on 2026-11-26 on a 31 GB machine: 663 failing and 1,805 healthy drives, 0.29M
+# train+val snapshots, 0.9 GiB training estimate, 3.7 min end to end with drive_index
+# cached.
 failing_fraction = 0.04
 healthy_fraction = 0.004
 stride_days = 7
 dense_days = 60
 
 [scales.medium]
-# 3,265 failing and 8,868 healthy drives. Measured before test got the drives first seen
-# after train_end and before the stratum used train_end, with 4,394 failing and 7,181
-# healthy: ~8 min on a 15 GB box once drive_index is cached, 1.74M train+val snapshots, 4.0
-# GiB training estimate.
+# Measured on 2026-11-26 on a 31 GB machine: 3,265 failing and 8,868 healthy drives, 1.52M
+# train+val snapshots, 2.4 GiB training estimate, 12.7 min end to end with drive_index
+# cached.
 failing_fraction = 0.2
 healthy_fraction = 0.02
 stride_days = 7

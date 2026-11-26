@@ -324,7 +324,7 @@ watch = ["steps/common.py", "steps/metrics.py", "steps/survival.py"]
 # So training stops at the same best iteration, with the same trees, without many extra
 # rounds after it.
 # smart and nosmart keep 100 on purpose: a uniform 50 stops them early and moved test
-# scores by up to 0.017 (checked). Recheck the stretches if the data or features change.
+# scores by up to 0.017 (checked on an earlier run). Recheck the stretches if the data or features change.
 # histogram: "col" (default, low memory) or "row" (about 1.6x faster per round, about
 # 2 GiB more for the 65-feature hazard models at full scale; a step falls back to "col"
 # when it does not fit, see steps/model.py).
